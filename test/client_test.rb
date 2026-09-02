@@ -91,6 +91,15 @@ module SolarJuice
         assert_equal "true", query_params(transport.last_request)["active"]
       end
 
+      def test_a_false_filter_is_sent_rather_than_dropped
+        # Only nil means "not set": active: false is a real filter.
+        client = build_client
+        transport.enqueue(body: { "items" => [], "next_cursor" => nil })
+        client.specials.list(active: false)
+
+        assert_equal "false", query_params(transport.last_request)["active"]
+      end
+
       def test_escapes_the_sku_in_the_path
         client = build_client
         transport.enqueue(body: { "sku" => "A/B C" })
@@ -176,6 +185,59 @@ module SolarJuice
         client.close
 
         assert transport.closed?
+      end
+
+      def test_inspect_never_prints_the_api_key
+        client = build_client
+
+        refute_includes client.inspect, TEST_KEY, "inspect would put the key in any debug log"
+        assert_includes client.inspect, "https://api.solarjuice.com.au"
+      end
+
+      def test_pretty_print_never_prints_the_api_key
+        require "pp"
+        client = build_client
+        printed = +""
+        PP.pp(client, printed)
+
+        refute_includes printed, TEST_KEY, "pp would put the key in a console session"
+      end
+
+      def test_no_instance_variable_holds_the_api_key
+        # Covers every other way a key escapes: YAML.dump, a serialised job
+        # payload, a crash reporter walking ivars.
+        client = build_client
+        held = client.instance_variables.map { |name| client.instance_variable_get(name).inspect }
+
+        refute_includes held.join(" "), TEST_KEY
+      end
+
+      def test_rejects_a_timeout_that_is_not_a_positive_number
+        [0, -1, "soon", nil, Float::INFINITY].each do |timeout|
+          error = assert_raises(ConfigurationError, "timeout: #{timeout.inspect} should not build") do
+            build_client(timeout: timeout)
+          end
+
+          assert_match(/timeout/, error.message)
+        end
+      end
+
+      def test_accepts_a_fractional_timeout
+        assert_in_delta 0.5, build_client(timeout: 0.5).timeout, 0.0001
+      end
+
+      def test_rejects_a_negative_or_non_integer_max_retries
+        [-1, "lots", nil].each do |max_retries|
+          error = assert_raises(ConfigurationError, "max_retries: #{max_retries.inspect} should not build") do
+            build_client(max_retries: max_retries)
+          end
+
+          assert_match(/max_retries/, error.message)
+        end
+      end
+
+      def test_accepts_zero_retries
+        assert_equal 0, build_client(max_retries: 0).max_retries
       end
 
       def test_uuid_v4_generator_sets_the_version_and_variant_bits

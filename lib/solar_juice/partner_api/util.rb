@@ -33,11 +33,12 @@ module SolarJuice
              .force_encoding(Encoding::UTF_8)
       end
 
-      # Drops nil values so an unset option never becomes "?brand=" and encodes
-      # booleans as the strings the API documents.
+      # Drops nil values so an unset option never becomes "?brand=", and
+      # stringifies the rest, which is what turns true and false into the
+      # "true" and "false" the API documents.
       def encode_query(params)
         pairs = params.reject { |_, value| value.nil? }.map do |key, value|
-          [key.to_s, value == true || value == false ? value.to_s : value.to_s]
+          [key.to_s, value.to_s]
         end
         return nil if pairs.empty?
 

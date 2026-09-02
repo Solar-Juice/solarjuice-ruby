@@ -112,6 +112,64 @@ module SolarJuice
         assert_empty result
       end
 
+      def test_cancel_posts_to_the_cancel_path_and_returns_the_order
+        client = build_client
+        cancelled = { "id" => "ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD", "status" => "cancelled" }
+        transport.enqueue(status: 200, body: cancelled)
+
+        order = client.orders.cancel("ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD")
+
+        request = transport.last_request
+        assert_equal :post, request.method
+        assert_equal "https://api.solarjuice.com.au/v1/orders/ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD/cancel", request.url
+        assert_equal cancelled, order
+        assert_equal "cancelled", order["status"]
+      end
+
+      def test_cancel_sends_no_body_when_there_is_no_note
+        client = build_client
+        transport.enqueue(status: 200, body: RECEIPT)
+
+        client.orders.cancel("ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD")
+
+        assert_nil transport.last_request.body, "the API records its own note when none is sent"
+        assert_nil transport.last_request.headers["Content-Type"]
+      end
+
+      def test_cancel_sends_the_note_as_json
+        client = build_client
+        transport.enqueue(status: 200, body: RECEIPT)
+
+        client.orders.cancel("ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD", note: "Customer changed the panel selection")
+
+        request = transport.last_request
+        assert_equal "application/json", request.headers["Content-Type"]
+        assert_equal({ "note" => "Customer changed the panel selection" }, JSON.parse(request.body))
+      end
+
+      def test_cancel_escapes_the_order_id
+        client = build_client
+        transport.enqueue(status: 200, body: RECEIPT)
+
+        client.orders.cancel("ord/one two")
+
+        assert_equal "https://api.solarjuice.com.au/v1/orders/ord%2Fone%20two/cancel", transport.last_request.url
+      end
+
+      def test_cancelling_too_late_raises_validation_failed
+        client = build_client(max_retries: 0)
+        transport.enqueue_response(
+          StubTransport.error_response(422, "VALIDATION_FAILED",
+                                       message: "order is already processing and cannot be cancelled by the partner")
+        )
+
+        error = assert_raises(ValidationFailedError) do
+          client.orders.cancel("ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD")
+        end
+
+        assert_equal 422, error.status_code
+      end
+
       def test_list_passes_the_documented_filters
         client = build_client
         transport.enqueue(body: { "as_of" => "2026-09-02T04:21:02Z", "items" => [], "next_cursor" => nil })

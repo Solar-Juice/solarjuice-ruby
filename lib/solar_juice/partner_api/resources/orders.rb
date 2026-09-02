@@ -18,7 +18,9 @@ module SolarJuice
         # result.idempotency_key so it can be logged next to the order.
         #
         # Note that client_reference in the body is what actually makes the call
-        # idempotent on the API side. The header is recorded for reconciliation.
+        # idempotent on the API side. The API accepts the header and ignores it:
+        # nothing stores, compares or returns it, so it is a correlation value
+        # for your own logs and nothing more.
         def create(body, idempotency_key: nil)
           key = idempotency_key || Util.uuid_v4
 
@@ -64,6 +66,27 @@ module SolarJuice
         def get(id, if_none_match: nil)
           headers = if_none_match ? { "If-None-Match" => if_none_match } : {}
           client.request(:get, "/v1/orders/#{Util.escape_path_segment(id)}", headers: headers)
+        end
+
+        # Cancels an order and returns it at its new status, with the
+        # cancellation appended to events.
+        #
+        # A partner can only cancel while the order is received, accepted or
+        # on_hold, which in practice means before operations key it into the
+        # fulfilment system. Later than that the API refuses with a 422 and the
+        # cancellation has to go through your account manager.
+        #
+        # note is recorded on the cancellation event. With none the API records
+        # "cancelled by partner", and no body is sent at all.
+        def cancel(id, note: nil)
+          body = note.nil? ? nil : { "note" => note }
+
+          client.request(
+            :post,
+            "/v1/orders/#{Util.escape_path_segment(id)}/cancel",
+            body: body,
+            headers: body.nil? ? {} : { "Content-Type" => "application/json" }
+          )
         end
       end
     end

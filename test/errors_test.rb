@@ -77,9 +77,92 @@ module SolarJuice
 
         error = assert_raises(UnauthorizedError) { client.health }
 
-        assert_nil error.code
+        assert_equal "UNAUTHORIZED", error.code
         assert_equal 401, error.status_code
         assert_empty error.details
+      end
+
+      def test_the_code_is_synthesised_from_the_status_when_there_is_no_envelope
+        # An edge page or an empty body must not leave code nil, or a caller
+        # branching on `e.code == "RATE_LIMITED"` silently falls through.
+        {
+          401 => "UNAUTHORIZED",
+          403 => "FORBIDDEN",
+          404 => "NOT_FOUND",
+          422 => "VALIDATION_FAILED",
+          429 => "RATE_LIMITED",
+          500 => "INTERNAL"
+        }.each do |status, code|
+          client = build_client(max_retries: 0)
+          transport.enqueue(status: status, body: "<html>edge page</html>")
+
+          error = assert_raises(ApiError) { client.health }
+
+          assert_equal code, error.code, "status #{status}"
+          assert_equal status, error.status_code
+        end
+      end
+
+      def test_a_rate_limited_edge_page_still_answers_to_the_documented_code
+        client = build_client(max_retries: 0)
+        transport.enqueue(status: 429, headers: { "Content-Type" => "text/html" }, body: "<html>429</html>")
+
+        error = assert_raises(RateLimitedError) { client.health }
+
+        assert_equal "RATE_LIMITED", error.code
+      end
+
+      def test_the_two_ambiguous_statuses_keep_a_nil_code
+        # 409 and 503 each cover two documented codes, so with no envelope there
+        # is nothing to choose between them.
+        [409, 503].each do |status|
+          client = build_client(max_retries: 0)
+          transport.enqueue(status: status, body: nil)
+
+          error = assert_raises(ApiError) { client.health }
+
+          assert_nil error.code, "status #{status}"
+          assert_instance_of ApiError, error
+        end
+      end
+
+      def test_retry_after_is_on_every_api_error_not_only_the_rate_limited_one
+        # The API sends Retry-After with 503 QUOTE_UNAVAILABLE as well, and the
+        # Node and PHP clients both surface it there.
+        client = build_client(max_retries: 0)
+        transport.enqueue_response(
+          StubTransport.error_response(503, "QUOTE_UNAVAILABLE", headers: { "Retry-After" => "2" })
+        )
+
+        error = assert_raises(QuoteUnavailableError) { client.health }
+
+        assert_equal 2, error.retry_after
+        assert_respond_to ApiError.new("any"), :retry_after
+      end
+
+      def test_retry_after_is_a_whole_number_of_seconds_from_the_date_form
+        client = build_client(max_retries: 0)
+        transport.enqueue(
+          status: 429,
+          headers: { "Retry-After" => (Time.now + 7).httpdate },
+          body: nil
+        )
+
+        error = assert_raises(RateLimitedError) { client.health }
+
+        # Rounded up, never a float: the other SDKs report 7 for this response.
+        assert_instance_of Integer, error.retry_after
+        assert_equal 7, error.retry_after
+      end
+
+      def test_retry_after_in_the_past_is_zero_not_a_negative_float
+        client = build_client(max_retries: 0)
+        transport.enqueue(status: 429, headers: { "Retry-After" => (Time.now - 30).httpdate }, body: nil)
+
+        error = assert_raises(RateLimitedError) { client.health }
+
+        assert_equal 0, error.retry_after
+        assert_instance_of Integer, error.retry_after
       end
 
       def test_unknown_status_and_unknown_code_land_on_the_generic_api_error

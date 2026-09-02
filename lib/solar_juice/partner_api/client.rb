@@ -38,6 +38,12 @@ module SolarJuice
       BACKOFF_BASE_SECONDS = 0.5
       BACKOFF_CAP_SECONDS = 8.0
 
+      # The API's own Retry-After values are seconds, but an edge proxy in front
+      # of it is not bound by that. Parking a worker for the hour a proxy asked
+      # for is worse than handing the caller the error and the number, so
+      # anything past this is not slept at all.
+      RETRY_AFTER_CAP_SECONDS = 60
+
       ENV_API_KEY = "SOLARJUICE_API_KEY"
 
       attr_reader :base_url, :timeout, :max_retries, :user_agent
@@ -62,6 +68,7 @@ module SolarJuice
       # api_key falls back to ENV["SOLARJUICE_API_KEY"].
       # user_agent is a suffix appended to solarjuice-ruby/<version>, not a
       # replacement, so Solar Juice can still see which SDK made the call.
+      # timeout is the deadline for a whole request, connect to last byte.
       # transport is the injection point described in Transport.
       # sleeper exists so tests can assert on backoff without waiting for it.
       def initialize(api_key: nil,
@@ -71,18 +78,25 @@ module SolarJuice
                      user_agent: nil,
                      transport: nil,
                      sleeper: nil)
-        @api_key = api_key || ENV[ENV_API_KEY]
-        if @api_key.nil? || @api_key.to_s.strip.empty?
+        key = api_key || ENV[ENV_API_KEY]
+        if key.nil? || key.to_s.strip.empty?
           raise ConfigurationError.new(
             "No API key. Pass api_key: to SolarJuice::PartnerApi::Client.new or set #{ENV_API_KEY}."
           )
         end
 
+        # The key is closed over instead of stored in an instance variable, so
+        # that nothing which walks ivars can print it: inspect, pp, YAML.dump, a
+        # serialised job payload or a crash reporter. Only the header builder
+        # can reach it.
+        authorization = "Bearer #{key}"
+        @authorization = -> { authorization }
+
         @base_url = (base_url || DEFAULT_BASE_URL).to_s.sub(%r{/+\z}, "")
-        @timeout = timeout
-        @max_retries = max_retries
+        @timeout = validate_timeout(timeout)
+        @max_retries = validate_max_retries(max_retries)
         @user_agent = build_user_agent(user_agent)
-        @transport = transport || NetHttpTransport.new(timeout: timeout)
+        @transport = transport || NetHttpTransport.new(timeout: @timeout)
         @sleeper = sleeper || ->(seconds) { sleep(seconds) }
 
         @catalogue = Resources::Catalogue.new(self)
@@ -120,7 +134,49 @@ module SolarJuice
         @transport.close if @transport.respond_to?(:close)
       end
 
+      # Replaces the default, which would print every instance variable and put
+      # the API key in whatever log the caller pointed at. Nothing here is
+      # secret.
+      def inspect
+        format(
+          "#<%s base_url=%p timeout=%p max_retries=%p>",
+          self.class.name, @base_url, @timeout, @max_retries
+        )
+      end
+
+      # pp falls back to inspect for any object whose class defines one, but
+      # spelling it out means a future refactor cannot quietly re-expose the
+      # key through the pretty printer.
+      def pretty_print(printer)
+        printer.text(inspect)
+      end
+
       private
+
+      # A timeout of zero or less would fail every request before it was sent
+      # and a negative retry count would make the retry loop meaningless. Both
+      # are mistakes in the caller's configuration, so they are refused at
+      # construction rather than at the first call.
+      # Numeric only, and kept as it was passed: the transport does arithmetic
+      # with it, so a string that merely looks like a number would fail later
+      # instead of here.
+      def validate_timeout(timeout)
+        seconds = timeout.is_a?(Numeric) ? Float(timeout, exception: false) : nil
+        return timeout if seconds&.finite? && seconds.positive?
+
+        raise ConfigurationError.new(
+          "timeout must be a positive number of seconds, got #{timeout.inspect}."
+        )
+      end
+
+      def validate_max_retries(max_retries)
+        retries = Integer(max_retries, exception: false)
+        return retries if retries && !retries.negative?
+
+        raise ConfigurationError.new(
+          "max_retries must be zero or a positive whole number, got #{max_retries.inspect}."
+        )
+      end
 
       def build_user_agent(suffix)
         base = "solarjuice-ruby/#{VERSION}"
@@ -129,7 +185,7 @@ module SolarJuice
 
       def default_headers
         {
-          "Authorization" => "Bearer #{@api_key}",
+          "Authorization" => @authorization.call,
           "Accept" => "application/json",
           "User-Agent" => @user_agent
         }
@@ -159,8 +215,13 @@ module SolarJuice
 
           if RETRYABLE_STATUSES.include?(response.status) && attempt < @max_retries
             # Retry-After is the API telling us exactly when it will serve us,
-            # so it wins over the computed backoff.
-            @sleeper.call(retry_after_seconds(response) || backoff_delay(attempt))
+            # so it wins over the computed backoff. Past the cap it stops being
+            # useful: hand the caller the error with the real value on it and
+            # let them decide.
+            wait = retry_after_seconds(response)
+            return response if wait && wait > RETRY_AFTER_CAP_SECONDS
+
+            @sleeper.call(wait || backoff_delay(attempt))
             attempt += 1
             next
           end
@@ -175,6 +236,9 @@ module SolarJuice
       end
 
       # Retry-After is either a number of seconds or an HTTP date (RFC 9110).
+      # The fractional value is what the retry loop sleeps for; the value on the
+      # error is rounded up to whole seconds, which is what the other SDKs
+      # report and what a caller can pass straight back to sleep.
       def retry_after_seconds(response)
         raw = response.headers["retry-after"]
         return nil if raw.nil? || raw.empty?
@@ -247,7 +311,11 @@ module SolarJuice
           nil
         end
 
-        code = envelope.is_a?(Hash) ? envelope["code"] : nil
+        # An edge proxy answering with its own HTML page carries no envelope, so
+        # the code is synthesised from the status. Without that, `if e.code ==
+        # "RATE_LIMITED"` falls through on exactly the response it was written
+        # for.
+        code = (envelope.is_a?(Hash) ? envelope["code"] : nil) || ERROR_CODES_BY_STATUS[response.status]
         message = (envelope.is_a?(Hash) ? envelope["message"] : nil) ||
                   "HTTP #{response.status} from the Solar Juice Partner API."
         details = envelope.is_a?(Hash) ? envelope["details"] : nil
@@ -261,7 +329,7 @@ module SolarJuice
           request_id: request_id,
           status_code: response.status
         }
-        kwargs[:retry_after] = retry_after_seconds(response) if klass == RateLimitedError
+        kwargs[:retry_after] = retry_after_seconds(response)&.ceil
 
         klass.new(message, **kwargs)
       end

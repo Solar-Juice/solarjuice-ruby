@@ -6,7 +6,9 @@ Rake::TestTask.new(:test) do |t|
   t.libs << "lib"
   t.libs << "test"
   t.test_files = FileList["test/**/*_test.rb"]
-  t.warning = false
+  # Warnings are on because a shadowed variable or an uninitialised ivar in a
+  # gem with no dependencies is nearly always a real bug.
+  t.warning = true
 end
 
 desc "Check every Ruby file parses"

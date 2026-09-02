@@ -1,0 +1,376 @@
+{
+  "description": "Shared response mapping table for the Solar Juice Partner API SDKs. One response in (status, headers, body), one decision out (error class, error code, retry decision). The Node, PHP and Ruby clients each drive this same file, so a divergence between them fails a test rather than turning up in a partner integration. Keep the three copies byte identical; add cases here first.",
+  "error_classes": {
+    "null": "the response is not an error at all",
+    "Base": "the base class for an error the API returned, used when nothing more specific can be told from the response. Every Base row here is a response the server produced, so an SDK whose everything-base also covers transport and configuration failures should map Base to its API-error base, not to that wider class",
+    "Unauthorized": "UNAUTHORIZED",
+    "Forbidden": "FORBIDDEN",
+    "NotFound": "NOT_FOUND",
+    "ValidationFailed": "VALIDATION_FAILED",
+    "RateLimited": "RATE_LIMITED",
+    "PriceChanged": "PRICE_CHANGED",
+    "IdempotencyConflict": "IDEMPOTENCY_CONFLICT",
+    "QuoteUnavailable": "QUOTE_UNAVAILABLE",
+    "StaleData": "STALE_DATA",
+    "Internal": "INTERNAL"
+  },
+  "notes": [
+    "retried is what the client does with maxRetries above zero: true means it sends the request again, false means it raises on the first response.",
+    "retry_after_seconds is asserted only where it is present, and is always a whole number of seconds rounded up.",
+    "A Retry-After above 60 seconds is not slept: the client raises immediately and carries the API's real value, so retried is false there."
+  ],
+  "cases": [
+    {
+      "name": "a documented list envelope",
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Request-Id": "req_01J6ZK3M5X8QW2R7Y9V4B1N0PD"
+      },
+      "body": "{\"as_of\":\"2026-09-02T04:10:11Z\",\"items\":[],\"next_cursor\":null}",
+      "expect": {
+        "error": null,
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "an empty 204, which carries no body at all",
+      "status": 204,
+      "headers": {},
+      "body": "",
+      "expect": {
+        "error": null,
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "a 200 that is an HTML page, as a captive portal or a proxy notice serves",
+      "status": 200,
+      "headers": {
+        "Content-Type": "text/html",
+        "X-Request-Id": "req_01J6ZK3M5X8QW2R7Y9V4B1N0PD"
+      },
+      "body": "<html><body>Sign in to continue</body></html>",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "a 200 that is valid JSON but not an object",
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "[1,2,3]",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "a redirect to another host, which is never followed",
+      "status": 302,
+      "headers": {
+        "Location": "https://portal.example.com/login"
+      },
+      "body": "",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "a permanent redirect, equally not followed",
+      "status": 301,
+      "headers": {
+        "Location": "https://api.example.com/v1/catalogue"
+      },
+      "body": "",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "an unauthorised key with the documented envelope",
+      "status": 401,
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Request-Id": "req_01J6ZK3M5X8QW2R7Y9V4B1N0PD"
+      },
+      "body": "{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"The API key is not valid.\",\"details\":[],\"request_id\":\"req_01J6ZK3M5X8QW2R7Y9V4B1N0PD\"}}",
+      "expect": {
+        "error": "Unauthorized",
+        "code": "UNAUTHORIZED",
+        "retried": false
+      }
+    },
+    {
+      "name": "a 401 from an edge with no envelope, where the code has to come from the status",
+      "status": 401,
+      "headers": {
+        "Content-Type": "text/html"
+      },
+      "body": "<html>401 Unauthorized</html>",
+      "expect": {
+        "error": "Unauthorized",
+        "code": "UNAUTHORIZED",
+        "retried": false
+      }
+    },
+    {
+      "name": "a scope failure",
+      "status": 403,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"This key does not carry orders:write.\",\"details\":[]}}",
+      "expect": {
+        "error": "Forbidden",
+        "code": "FORBIDDEN",
+        "retried": false
+      }
+    },
+    {
+      "name": "an unknown SKU",
+      "status": 404,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"No such SKU for this channel.\",\"details\":[]}}",
+      "expect": {
+        "error": "NotFound",
+        "code": "NOT_FOUND",
+        "retried": false
+      }
+    },
+    {
+      "name": "a 404 with no envelope",
+      "status": 404,
+      "headers": {},
+      "body": "",
+      "expect": {
+        "error": "NotFound",
+        "code": "NOT_FOUND",
+        "retried": false
+      }
+    },
+    {
+      "name": "a validation failure with per field details",
+      "status": 422,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"VALIDATION_FAILED\",\"message\":\"lines[1].quantity is out of range.\",\"details\":[{\"field\":\"lines[1].quantity\",\"message\":\"must be between 1 and 9999\"}]}}",
+      "expect": {
+        "error": "ValidationFailed",
+        "code": "VALIDATION_FAILED",
+        "retried": false
+      }
+    },
+    {
+      "name": "a price change, one of the two codes behind 409",
+      "status": 409,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"PRICE_CHANGED\",\"message\":\"The price list moved while the order was in flight.\",\"details\":[{\"sku\":\"GW-5000-DNS-30\",\"submitted\":\"1110.99\",\"current\":\"1129.50\"}]}}",
+      "expect": {
+        "error": "PriceChanged",
+        "code": "PRICE_CHANGED",
+        "retried": false
+      }
+    },
+    {
+      "name": "an idempotency conflict, the other code behind 409",
+      "status": 409,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"IDEMPOTENCY_CONFLICT\",\"message\":\"That client_reference was used with a different body.\",\"details\":[]}}",
+      "expect": {
+        "error": "IdempotencyConflict",
+        "code": "IDEMPOTENCY_CONFLICT",
+        "retried": false
+      }
+    },
+    {
+      "name": "a 409 with no envelope, where the status alone cannot choose between two codes",
+      "status": 409,
+      "headers": {},
+      "body": "",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": false
+      }
+    },
+    {
+      "name": "a rate limit with no Retry-After",
+      "status": 429,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"RATE_LIMITED\",\"message\":\"Rate limit exceeded.\",\"details\":[]}}",
+      "expect": {
+        "error": "RateLimited",
+        "code": "RATE_LIMITED",
+        "retried": true,
+        "retry_after_seconds": null
+      }
+    },
+    {
+      "name": "a rate limit with a Retry-After in delta seconds",
+      "status": 429,
+      "headers": {
+        "Content-Type": "application/json",
+        "Retry-After": "5"
+      },
+      "body": "{\"error\":{\"code\":\"RATE_LIMITED\",\"message\":\"Rate limit exceeded.\",\"details\":[]}}",
+      "expect": {
+        "error": "RateLimited",
+        "code": "RATE_LIMITED",
+        "retried": true,
+        "retry_after_seconds": 5
+      }
+    },
+    {
+      "name": "a rate limit exactly at the 60 second cap, which is still honoured",
+      "status": 429,
+      "headers": {
+        "Content-Type": "application/json",
+        "Retry-After": "60"
+      },
+      "body": "{\"error\":{\"code\":\"RATE_LIMITED\",\"message\":\"Rate limit exceeded.\",\"details\":[]}}",
+      "expect": {
+        "error": "RateLimited",
+        "code": "RATE_LIMITED",
+        "retried": true,
+        "retry_after_seconds": 60
+      }
+    },
+    {
+      "name": "an edge advising an hour, above the cap, so the client raises instead of sleeping",
+      "status": 429,
+      "headers": {
+        "Retry-After": "3600"
+      },
+      "body": "",
+      "expect": {
+        "error": "RateLimited",
+        "code": "RATE_LIMITED",
+        "retried": false,
+        "retry_after_seconds": 3600
+      }
+    },
+    {
+      "name": "a 429 from an edge with no envelope at all",
+      "status": 429,
+      "headers": {
+        "Content-Type": "text/html"
+      },
+      "body": "<html>429 Too Many Requests</html>",
+      "expect": {
+        "error": "RateLimited",
+        "code": "RATE_LIMITED",
+        "retried": true
+      }
+    },
+    {
+      "name": "an internal error, which is not in the retryable set",
+      "status": 500,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"INTERNAL\",\"message\":\"Something went wrong.\",\"details\":[]}}",
+      "expect": {
+        "error": "Internal",
+        "code": "INTERNAL",
+        "retried": false
+      }
+    },
+    {
+      "name": "a bad gateway from an edge",
+      "status": 502,
+      "headers": {
+        "Content-Type": "text/html"
+      },
+      "body": "<html>502 Bad Gateway</html>",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": true
+      }
+    },
+    {
+      "name": "the freight engine being unreachable",
+      "status": 503,
+      "headers": {
+        "Content-Type": "application/json",
+        "Retry-After": "2"
+      },
+      "body": "{\"error\":{\"code\":\"QUOTE_UNAVAILABLE\",\"message\":\"The freight engine is not answering.\",\"details\":[]}}",
+      "expect": {
+        "error": "QuoteUnavailable",
+        "code": "QUOTE_UNAVAILABLE",
+        "retried": true,
+        "retry_after_seconds": 2
+      }
+    },
+    {
+      "name": "data too old to serve, the other code behind 503",
+      "status": 503,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"STALE_DATA\",\"message\":\"The inventory snapshot is too old.\",\"details\":[]}}",
+      "expect": {
+        "error": "StaleData",
+        "code": "STALE_DATA",
+        "retried": true
+      }
+    },
+    {
+      "name": "a 503 with no envelope, where the status alone cannot choose between two codes",
+      "status": 503,
+      "headers": {},
+      "body": "",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": true
+      }
+    },
+    {
+      "name": "a gateway timeout",
+      "status": 504,
+      "headers": {},
+      "body": "",
+      "expect": {
+        "error": "Base",
+        "code": null,
+        "retried": true
+      }
+    },
+    {
+      "name": "a code this release predates, which must survive on the base error",
+      "status": 451,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"EMBARGOED\",\"message\":\"Not available in this territory.\",\"details\":[]}}",
+      "expect": {
+        "error": "Base",
+        "code": "EMBARGOED",
+        "retried": false
+      }
+    }
+  ]
+}

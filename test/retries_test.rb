@@ -132,6 +132,47 @@ module SolarJuice
         assert_operator sleeper.delays.first, :<=, Client::BACKOFF_BASE_SECONDS
       end
 
+      def test_a_retry_after_beyond_the_cap_is_not_slept
+        # An edge proxy is not bound by the API's own small values, and parking
+        # a worker for an hour is worse than failing.
+        client = build_client
+        transport.enqueue_response(
+          StubTransport.error_response(429, "RATE_LIMITED", headers: { "Retry-After" => "3600" })
+        )
+
+        error = assert_raises(RateLimitedError) { client.health }
+
+        assert_empty sleeper.delays
+        assert_equal 1, transport.requests.size
+        assert_equal 3600, error.retry_after, "the real value still reaches the caller"
+      end
+
+      def test_a_retry_after_at_the_cap_is_still_honoured
+        client = build_client
+        transport.enqueue_response(
+          StubTransport.error_response(503, "STALE_DATA",
+                                       headers: { "Retry-After" => Client::RETRY_AFTER_CAP_SECONDS.to_s })
+        )
+        transport.enqueue(body: { "status" => "ok" })
+
+        client.health
+
+        assert_equal [Client::RETRY_AFTER_CAP_SECONDS], sleeper.delays
+      end
+
+      def test_a_retry_after_date_beyond_the_cap_is_not_slept_either
+        client = build_client
+        transport.enqueue_response(
+          StubTransport.error_response(503, "QUOTE_UNAVAILABLE",
+                                       headers: { "Retry-After" => (Time.now + 900).httpdate })
+        )
+
+        assert_raises(QuoteUnavailableError) { client.health }
+
+        assert_empty sleeper.delays
+        assert_equal 1, transport.requests.size
+      end
+
       def test_a_retried_post_keeps_its_idempotency_key
         # The whole reason POST /v1/orders is safe to retry: the second attempt
         # must carry the same key as the first.

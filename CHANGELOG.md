@@ -18,8 +18,12 @@ Initial release, matching version 1.0.0 of the Solar Juice Partner API.
   the caller does not supply one and returned on the result.
 - Conditional reads: `orders.get(id, if_none_match:)` answers a `304` with a
   `NotModified` result instead of raising.
+- `orders.cancel(id, note:)` for cancelling an order before operations key it
+  into the fulfilment system.
 - Retries with exponential backoff and full jitter on 429, 502, 503, 504 and
-  network failures, honouring `Retry-After`.
+  network failures, honouring `Retry-After` up to a 60 second cap.
+- `timeout` as a deadline for a whole request rather than a per read timeout,
+  so a stalled or dribbling response cannot hold a call open past it.
 - An error class per documented error code, all under
   `SolarJuice::PartnerApi::Error`.
 - Rate limit headers, the last request id and the price list version exposed on

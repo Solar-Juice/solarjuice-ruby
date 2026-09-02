@@ -25,6 +25,7 @@ module SolarJuice
         "createOrder" => [:orders, :create],
         "listOrders" => [:orders, :list],
         "getOrder" => [:orders, :get],
+        "cancelOrder" => [:orders, :cancel],
         "getHealth" => [nil, :health]
       }.freeze
 
@@ -107,7 +108,9 @@ module SolarJuice
           positional = []
           path_params = (operation["parameters"] || []).map { |p| resolve(p) }.select { |p| p["in"] == "path" }
           path_params.each { |parameter| positional << arguments.fetch(parameter["name"]) }
-          positional << {} if operation["requestBody"]
+          # Only a required body is a positional argument. An optional one, as
+          # on cancelOrder, is spelled as keyword options instead.
+          positional << {} if operation.dig("requestBody", "required")
 
           target.public_send(method_name, *positional)
 

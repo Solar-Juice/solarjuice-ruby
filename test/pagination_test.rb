@@ -78,6 +78,28 @@ module SolarJuice
         assert_equal 1, transport.requests.size
       end
 
+      def test_auto_page_raises_when_the_cursor_stops_moving
+        # A server handing back the cursor it was just given would page forever
+        # and burn the whole rate allowance.
+        client = build_client
+        transport.enqueue(body: page([{ "sku" => "A" }], "stuck"))
+        transport.enqueue(body: page([{ "sku" => "A" }], "stuck"))
+
+        error = assert_raises(Error) { client.catalogue.auto_page.to_a }
+
+        assert_equal "PAGINATION_STALLED", error.code
+        assert_equal 2, transport.requests.size, "it must stop at the repeat, not keep asking"
+      end
+
+      def test_auto_page_raises_when_a_supplied_cursor_comes_straight_back
+        client = build_client
+        transport.enqueue(body: page([{ "sku" => "A" }], "resume-here"))
+
+        assert_raises(Error) { client.orders.auto_page(cursor: "resume-here").to_a }
+
+        assert_equal 1, transport.requests.size
+      end
+
       def test_every_list_resource_has_an_auto_page
         client = build_client
 

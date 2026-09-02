@@ -68,6 +68,33 @@ module SolarJuice
 
         assert_kind_of TransportError, error
       end
+
+      def test_the_timeout_is_a_deadline_for_the_whole_exchange_not_for_one_read
+        # A server dribbling a byte at a time keeps every individual read inside
+        # the timeout, so a per read timeout never fires and the call hangs on
+        # for as long as the server cares to keep writing.
+        @server = LoopbackServer.new(mode: :dribble)
+        client = build_real_client(@server, timeout: 0.5, max_retries: 0)
+
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        error = assert_raises(TimeoutError) { client.health }
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_kind_of TransportError, error
+        assert_operator elapsed, :<, 2.0, "the deadline covers the body, not just the wait for headers"
+      end
+
+      def test_a_deadline_breach_does_not_poison_the_pooled_connection
+        # The socket is abandoned mid response, so it has to be dropped rather
+        # than handed to the next call.
+        @server = LoopbackServer.new(mode: :dribble)
+        client = build_real_client(@server, timeout: 0.5, max_retries: 0)
+
+        assert_raises(TimeoutError) { client.health }
+        assert_raises(TimeoutError) { client.health }
+
+        assert_equal 2, @server.connection_count, "the second call must open a fresh connection"
+      end
     end
   end
 end

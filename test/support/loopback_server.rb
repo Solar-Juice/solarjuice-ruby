@@ -11,9 +11,15 @@ module SolarJuice
     class LoopbackServer
       RESPONSE_BODY = '{"status":"ok"}'
 
-      # :ok    answer every request on the connection
-      # :once  answer one request then close, as a keep-alive timeout would
-      # :hang  accept and never answer, to trip the read timeout
+      # Slow enough that no single read times out, long enough that a client
+      # without a total deadline waits several seconds for the EOF at the end.
+      DRIBBLE_INTERVAL = 0.1
+      DRIBBLE_BYTES = 40
+
+      # :ok      answer every request on the connection
+      # :once    answer one request then close, as a keep-alive timeout would
+      # :hang    accept and never answer, to trip the read timeout
+      # :dribble send the headers, then a byte of the body at a time forever
       def initialize(mode: :ok)
         @mode = mode
         @server = TCPServer.new("127.0.0.1", 0)
@@ -67,6 +73,11 @@ module SolarJuice
           break if @mode == :close
           sleep if @mode == :hang
 
+          if @mode == :dribble
+            dribble(connection)
+            break
+          end
+
           connection.write(
             "HTTP/1.1 200 OK\r\n" \
             "Content-Type: application/json\r\n" \
@@ -81,6 +92,23 @@ module SolarJuice
         connection.close
       rescue Errno::EPIPE, Errno::ECONNRESET, IOError
         nil
+      end
+
+      # Headers, then a body that never finishes arriving. Every individual read
+      # succeeds, which is exactly what a per read timeout cannot catch.
+      def dribble(connection)
+        connection.write(
+          "HTTP/1.1 200 OK\r\n" \
+          "Content-Type: application/json\r\n" \
+          "Content-Length: 64\r\n\r\n"
+        )
+        connection.flush
+
+        DRIBBLE_BYTES.times do
+          connection.write("x")
+          connection.flush
+          sleep DRIBBLE_INTERVAL
+        end
       end
     end
   end

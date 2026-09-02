@@ -76,10 +76,23 @@ With no key in either place, the constructor raises
 |---|---|---|
 | `api_key:` | `ENV["SOLARJUICE_API_KEY"]` | Your partner key |
 | `base_url:` | `https://api.solarjuice.com.au` | Override for a proxy or a test double |
-| `timeout:` | `30` | Connect and read timeout in seconds |
+| `timeout:` | `30` | Deadline in seconds for a whole request, connect to last byte |
 | `max_retries:` | `3` | Retries after the first attempt |
 | `user_agent:` | none | Suffix appended to `solarjuice-ruby/<version>` |
 | `transport:` | `NetHttpTransport` | See [Testing](#testing) |
+
+`timeout` is a deadline for the entire exchange, not a per read timeout, so a
+server that stalls or dribbles a response one byte at a time cannot hold a call
+open past it. A `timeout` of zero or less, or a negative `max_retries`, raises
+`ConfigurationError` at construction.
+
+The API key is never printed. `client.inspect`, `pp client` and anything else
+that walks the object show the base URL and the options, and no credential:
+
+```ruby
+client.inspect
+# => #<SolarJuice::PartnerApi::Client base_url="https://api.solarjuice.com.au" timeout=30 max_retries=3>
+```
 
 ## Resources
 
@@ -89,7 +102,7 @@ With no key in either place, the constructor raises
 | `client.inventory` | `list`, `auto_page`, `get(sku)` |
 | `client.specials` | `list`, `auto_page` |
 | `client.shipping` | `quote(body)` |
-| `client.orders` | `create(body, idempotency_key:)`, `list`, `auto_page`, `get(id, if_none_match:)` |
+| `client.orders` | `create(body, idempotency_key:)`, `list`, `auto_page`, `get(id, if_none_match:)`, `cancel(id, note:)` |
 | `client` | `health` |
 
 Option names match the API's parameter names, in snake case:
@@ -118,6 +131,10 @@ end
 
 first_fifty = client.catalogue.auto_page.lazy.first(50)
 ```
+
+If the API ever hands back the cursor it was just given, `auto_page` raises
+`SolarJuice::PartnerApi::Error` with the code `PAGINATION_STALLED` rather than
+paging forever and spending your whole rate allowance on one loop.
 
 ### Incremental sync
 
@@ -158,6 +175,21 @@ receipt = client.orders.create(
 receipt["id"]     # ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD
 receipt["status"] # received, because acceptance is asynchronous
 ```
+
+## Cancelling an order
+
+An order can be cancelled while it is `received`, `accepted` or `on_hold`,
+which in practice means before operations key it into the fulfilment system.
+After that the API refuses with `ValidationFailedError` and the cancellation
+has to go through your account manager. `cancelled` is terminal; there is no
+un-cancel.
+
+```ruby
+order = client.orders.cancel(receipt["id"], note: "Customer changed the panel selection")
+order["status"] # cancelled
+```
+
+The note is optional. Without one the API records `cancelled by partner`.
 
 ## Idempotency
 
@@ -242,19 +274,30 @@ end
 Every one carries `code`, `message`, `details`, `request_id` and `status_code`.
 Quote `request_id` when you raise a support request.
 
-An unknown code, or an error body that is not the documented envelope, raises
-`ApiError` itself with whatever could be read from the response. Network
-failures and timeouts raise `TransportError` and `TimeoutError`, which carry no
-status code because no response arrived.
+An unknown code raises `ApiError` itself with the code the API sent. When the
+response carries no error envelope at all, which is what an edge proxy's own
+HTML page looks like, `code` is filled in from the status (401 `UNAUTHORIZED`,
+403 `FORBIDDEN`, 404 `NOT_FOUND`, 422 `VALIDATION_FAILED`, 429 `RATE_LIMITED`,
+500 `INTERNAL`) so `e.code == "RATE_LIMITED"` still holds. 409 and 503 each
+cover two codes, so those keep a nil `code` and raise `ApiError`.
+
+`retry_after` on `RateLimitedError` is a whole number of seconds, rounded up,
+whether the header arrived as seconds or as an HTTP date.
+
+Network failures and timeouts raise `TransportError` and `TimeoutError`, which
+carry no status code because no response arrived.
 
 ## Retries
 
 429, 502, 503, 504 and network failures are retried up to `max_retries` times
 with exponential backoff starting at 500ms, doubling, with full jitter, capped
-at 8 seconds. A `Retry-After` header wins over the computed delay. No other 4xx
-is retried. Both `POST` endpoints are safe to retry: quotes have no side effect,
-and orders are deduplicated by `client_reference`, which does not change
-between attempts.
+at 8 seconds. A `Retry-After` header wins over the computed delay, up to 60
+seconds. Beyond that it is not slept at all: the error is raised straight away
+with the real value on `retry_after`, because an edge proxy asking for an hour
+should not park a worker for one. No other 4xx is retried. The `POST` endpoints
+are safe to retry: quotes have no side effect, orders are deduplicated by
+`client_reference`, which does not change between attempts, and a cancellation
+that already happened is refused rather than repeated.
 
 Set `max_retries: 0` to handle retries yourself.
 
@@ -312,6 +355,10 @@ bundle exec rake test
 The suite runs entirely against a stubbed transport. `test/conformance_test.rb`
 parses `spec/openapi.yaml` and fails if the API grows an operation, a query
 parameter or an error code this gem does not implement.
+`test/fixtures/error-mapping.json` is the shared behaviour table: one response
+in, one error class, error code and retry decision out. The Node and PHP
+clients replay the same file byte for byte, so the three cannot drift apart
+unnoticed.
 
 ## Licence
 
