@@ -25,6 +25,95 @@ info:
     operations, and are listed back to you flagged. Use a test key to build
     against, then swap in a live key with no other change.
 
+    # Getting started
+
+    ## 1. Get a key
+
+    Keys are minted in the developer portal at https://dev.solarjuice.com.au
+    by an owner on your channel. Portal access is by invitation from your
+    Solar Juice account manager.
+
+    A key looks like `sj_live_<keyid>_<secret>` or, in the sandbox,
+    `sj_test_<keyid>_<secret>`. Sandbox keys read the same shapes but never
+    touch live stock or your trade account, so start there. The secret is
+    shown once, at creation. Store it somewhere your application can read at
+    runtime and never commit it.
+
+    ## 2. Make a request
+
+    Send the key as a bearer token. Every response carries `X-Request-Id`;
+    quote it when you contact support.
+
+    ```
+    curl -sS https://api.solarjuice.com.au/v1/catalogue?limit=2 \
+      -H "Authorization: Bearer $SOLARJUICE_API_KEY"
+    ```
+
+    Every list response has the same envelope. `items` holds the page,
+    `next_cursor` is the cursor for the following page and is `null` on the
+    last one, and `as_of` is the freshest source timestamp behind the page.
+
+    ```
+    {
+      "as_of": "2026-09-02T02:14:07Z",
+      "price_list_version": "plv_9f3a2c1d84b6e05",
+      "stale": false,
+      "items": [ ... ],
+      "next_cursor": "U0tVLTAxMQ"
+    }
+    ```
+
+    ## 3. Sync a catalogue
+
+    Read every page once, keep `as_of`, then pass it back as
+    `updated_since` on the next run so you only fetch what changed. The
+    official SDKs do this walk for you.
+
+    ## 4. Sell and order
+
+    Quote freight with `POST /v1/shipping/quotes`, then place the order with
+    `POST /v1/orders`, passing the `quote_id` and the `price_list_version`
+    you sold at. Sending the version is what lets us reject an order that
+    was priced against a stale list rather than silently repricing it.
+
+    Set a `client_reference` (your purchase order number) on every order. It
+    is the idempotency key: a retry after a timeout with the same
+    `client_reference` and the same body returns the original order rather
+    than creating a second one.
+
+    ## Sandbox and live
+
+    The sandbox is not a separate host. The same base URL serves both, and
+    the key decides which environment you are in. Move to a live key only
+    once your order flow works end to end against the sandbox.
+
+    A sandbox key reads the real catalogue, the real prices and the real
+    inventory, and its freight quotes are real quotes from the real engine.
+    What it does not do is simulate fulfilment. A sandbox order is validated,
+    priced and stored exactly as a live one, reaches `accepted`, and stops
+    there: operations never see it, so it will never move to `processing` or
+    `dispatched`, and no stock is committed. Test your cancellation path
+    instead, which does work in the sandbox from `accepted`.
+
+    # SDKs
+
+    Official clients, each with zero runtime dependencies and a conformance
+    test that fails if this specification grows an operation the client does
+    not implement.
+
+    | Language | Package | Source |
+    | --- | --- | --- |
+    | Node.js 18+ | `@solarjuice/partner-api` | https://github.com/Solar-Juice/solarjuice-node |
+    | PHP 8.1+ | `solarjuice/partner-api` | https://github.com/Solar-Juice/solarjuice-php |
+    | Ruby 3.0+ | `solarjuice-partner-api` | https://github.com/Solar-Juice/solarjuice-ruby |
+
+    Each handles authentication, cursor pagination, conditional requests,
+    retry with backoff on 429 and 5xx, and maps every error code below to
+    its own exception class.
+
+    You do not need one. The API is plain JSON over HTTPS and works with any
+    HTTP client.
+
     # Authentication
 
     Every request except `GET /v1/health` must carry a bearer token:
@@ -60,10 +149,14 @@ info:
     `Retry-After` header in seconds. Back off for at least that long. Repeated
     429s without backing off may lead to the key being throttled further.
 
+    `GET /v1/health` is the one exception. It is unauthenticated, so there is
+    no key to count against: it carries no `RateLimit-*` headers and never
+    answers `429`.
+
     # Request ids
 
     Every response carries `X-Request-Id` (for example
-    `req_01J6ZK3M5X8QW2R7Y9V4B1N0PD`). The same value is repeated as
+    `req_01j6zk3m5x8qw2r7y9v4b1n0pd`). The same value is repeated as
     `request_id` inside every error body. Quote it when raising a support
     request; it lets Solar Juice find the exact request in the logs.
 
@@ -78,9 +171,15 @@ info:
     * Every list response carries `as_of`, the freshest source timestamp
       behind the data on the page.
 
-    A cursor is valid for the query it was issued with. Changing `limit`,
-    `updated_since` or any filter between pages invalidates it and returns
-    `422 VALIDATION_FAILED`.
+    * A `limit` above 500 is clamped to 500 rather than refused. A `limit`
+      that is not a positive integer, and a `cursor` that is not one the API
+      issued, are both `400 VALIDATION_FAILED`.
+
+    A cursor encodes a position, not a query. Changing `limit`,
+    `updated_since` or a filter partway through a walk is accepted and simply
+    resumes from that position under the new query, so the page you get back
+    is the one the new query would have produced from there. Finish a walk
+    with the parameters you started it with if you want a coherent snapshot.
 
     Catalogue, inventory, specials and orders accept `updated_since=<ISO 8601>`
     and return only items changed at or after that instant. The filter is
@@ -96,18 +195,60 @@ info:
     Inventory tuples that drop to zero are still returned by `updated_since`
     queries (with `total: 0`) so a client can clear them.
 
+    ## `updated_since` does not see every price change
+
+    On the catalogue, `updated_at` tracks the product read model: it moves
+    when the product record changes, including its list price. It does not
+    move when the price you pay changes for any other reason. A special
+    starting or ending, a change to your channel discount, or a per SKU
+    override being added all change `price` while `updated_at` stands still,
+    so a catalogue sync driven by `updated_since` alone will keep selling at
+    yesterday's price.
+
+    `X-Price-List-Version` is the reliable signal. It is derived from the
+    resolved prices themselves, so it changes whenever any price in your
+    catalogue changes, whatever the cause. Keep the last value you saw,
+    compare the header on every response, and when it differs re-read the
+    full catalogue rather than an `updated_since` slice. The version is also
+    what `POST /v1/orders` checks: submitting an order against a version that
+    is no longer current is `409 PRICE_CHANGED`.
+
+    # Webhooks
+
+    There are none in stage 1. Solar Juice does not call your systems, and
+    there is nothing to register or verify. Polling is the intended pattern:
+    `GET /v1/orders?updated_since=` for order status, `X-Price-List-Version`
+    for prices, and `GET /v1/inventory?updated_since=` for stock.
+
     # Idempotency
 
-    `POST /v1/orders` is idempotent on `client_reference`. Each channel has a
-    unique `client_reference` per order (for example your purchase order
-    number). Submitting the same `client_reference` with an identical body
-    returns the original `202` receipt; submitting it with a different body
-    returns `409 IDEMPOTENCY_CONFLICT`. An optional `Idempotency-Key` header is
-    accepted and recorded but `client_reference` is the key that matters.
+    `POST /v1/orders` is idempotent on `client_reference`, and on nothing
+    else. Each channel has a unique `client_reference` per order (for example
+    your purchase order number). The first submission returns `202` with the
+    new order. Submitting the same `client_reference` again with the same
+    body returns `200` with the order that already exists; submitting it with
+    a different body returns `409 IDEMPOTENCY_CONFLICT`. The comparison is on
+    the meaningful content of the request (reference, version, quote, rate,
+    delivery address, lines and note), normalised for case and whitespace, so
+    a retry that differs only in formatting is still a replay.
 
-    `POST /v1/shipping/quotes` is not idempotent; every call produces a new
-    `quote_id`. Quotes are cheap to request and expire quickly, so request a
-    fresh one when the cart or destination changes.
+    Sandbox and live have separate `client_reference` namespaces: the same
+    reference used with a `sj_test_` key and a `sj_live_` key is two orders,
+    not a conflict.
+
+    An `Idempotency-Key` header is accepted for compatibility with generic
+    HTTP clients and is then ignored. It is not stored, not compared and not
+    returned, so it cannot be used to reconcile anything. Use
+    `client_reference`.
+
+    `POST /v1/shipping/quotes` produces a new `quote_id` for a cart the API
+    has not seen. It is not idempotent in the strict sense, but it is cached:
+    an identical normalised cart, destination, origin and channel within the
+    quote's lifetime is served the same `quote_id` again, as long as at least
+    five minutes of its validity remain. In practice a repeated quote for an
+    unchanged cart returns the same id for up to about 25 minutes, and then a
+    fresh one. Never rely on either behaviour; read `quote_id` and
+    `expires_at` from the response you have.
 
     # Versioning and deprecation
 
@@ -129,6 +270,10 @@ info:
       exclusive of GST unless the field name says otherwise: `"1234.50"`.
       Never a float. `gst` and `total` on an order are the exceptions: `gst`
       is the GST amount and `total` is inclusive of GST.
+    * Percentages are JSON numbers, not strings, with at most two decimal
+      places: `percent_off` for 15 percent is `15`, and for 12.5 percent is
+      `12.5`. Money is a string and percentages are numbers; the two do not
+      follow the same rule.
     * Quantities are integers.
     * Timestamps are UTC ISO 8601 with a `Z` suffix: `2026-09-02T04:10:11Z`.
     * SKUs are Solar Juice part numbers, case sensitive, for example
@@ -139,9 +284,12 @@ info:
     # Caching
 
     Priced responses are per channel and are served with
-    `Cache-Control: private, no-store`. `GET /v1/orders/{id}` returns an `ETag`
-    and honours `If-None-Match` with a `304`. There is no edge cache: every
-    request reaches the API and counts against the rate limit.
+    `Cache-Control: private, no-store`: the catalogue, specials, shipping
+    quotes and orders. `GET /v1/orders/{id}` returns a weak `ETag` of the form
+    `W/"a1b2c3d4e5f60718"` and honours `If-None-Match` with a `304`; compare
+    it byte for byte and send back exactly what you received, weak prefix
+    included. There is no edge cache: every request reaches the API and
+    counts against the rate limit.
 
     # Errors
 
@@ -153,10 +301,16 @@ info:
         "code": "PRICE_CHANGED",
         "message": "Human readable explanation",
         "details": [],
-        "request_id": "req_01J6ZK3M5X8QW2R7Y9V4B1N0PD"
+        "request_id": "req_01j6zk3m5x8qw2r7y9v4b1n0pd"
       }
     }
     ```
+
+    `details` is a list of free-form objects whose keys depend on the code.
+    Field problems carry `field` and `reason` (not `message`); `PRICE_CHANGED`
+    and `IDEMPOTENCY_CONFLICT` use their own keys again. Read `code` and
+    `message` for behaviour and treat `details` as diagnostic: new keys may
+    be added at any time.
 
     | Code | HTTP | When |
     |---|---|---|
@@ -168,8 +322,15 @@ info:
     | `PRICE_CHANGED` | 409 | Order line prices or `price_list_version` no longer match; `details` carries current values |
     | `IDEMPOTENCY_CONFLICT` | 409 | Same `client_reference` submitted with a different body |
     | `QUOTE_UNAVAILABLE` | 503 | Freight engine temporarily unreachable; honour `Retry-After` |
-    | `STALE_DATA` | 503 | The catalogue or inventory behind this request is older than the safety threshold and the operation cannot be served safely |
+    | `STALE_DATA` | 503 | The catalogue or inventory read model is not loaded on the instance that answered; honour `Retry-After` and retry |
     | `INTERNAL` | 500 | Unexpected failure; retry with backoff and report the `request_id` if it persists |
+
+    `STALE_DATA` means one thing only: the instance that answered has no
+    catalogue or inventory document loaded, usually for a few seconds after a
+    deployment or a publish. It is not a staleness threshold and it is not a
+    trading halt. The separate `stale` flag on catalogue and inventory
+    responses is the age signal, and orders are accepted normally while it is
+    `true`: treat stale figures as indicative, not as a reason to stop.
 
   termsOfService: https://dev.solarjuice.com.au/terms
   contact:
@@ -200,7 +361,7 @@ tags:
   - name: Shipping
     description: Freight quotes produced by the same engine as the Solar Outlet checkout. A quote is required to place an order.
   - name: Orders
-    description: Orders placed against this channel's trade account. Acceptance is asynchronous; poll the order for status.
+    description: Orders placed against this channel's trade account. Validation and acceptance are synchronous; poll the order for fulfilment status.
   - name: Health
     description: Unauthenticated liveness check.
 
@@ -222,21 +383,34 @@ paths:
         between, the order is refused with `409 PRICE_CHANGED` and you should
         refresh.
 
-        Supports cursor pagination and `updated_since`; see the introduction.
+        It is also the only reliable change signal for prices. `updated_at`
+        moves when the product record changes; it does not move when a special
+        starts or ends, or when your channel discount or a per SKU override
+        changes, all of which change `price`. So watch
+        `X-Price-List-Version`, and when it differs from the one you hold,
+        re-read the whole catalogue rather than an `updated_since` slice.
+
+        Supports cursor pagination, `updated_since` and the `brand` and
+        `category` filters; see the introduction.
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
         - $ref: '#/components/parameters/updated_since'
         - name: brand
           in: query
-          description: Exact brand name filter, for example `GoodWe`.
+          description: |
+            Return only products with this brand. The whole value must match,
+            but case is ignored, so `goodwe` and `GoodWe` are the same filter.
           required: false
           schema:
             type: string
             examples: [GoodWe]
         - name: category
           in: query
-          description: Exact category filter, for example `Inverter`, `Panel`, `Battery`, `Rail`.
+          description: |
+            Return only products in this category, for example `Inverter`,
+            `Panel`, `Battery` or `Rail`. Matched like `brand`: whole value,
+            case ignored.
           required: false
           schema:
             type: string
@@ -264,7 +438,8 @@ paths:
                   summary: First page of two products, more pages follow
                   value:
                     as_of: '2026-09-02T04:10:11Z'
-                    price_list_version: '2026-09-02T04:00:00Z'
+                    price_list_version: plv_9f3a2c1d84b6e05
+                    stale: false
                     items:
                       - sku: GW-5000-DNS-30
                         title: GoodWe 5kW Single Phase Hybrid Inverter
@@ -283,18 +458,18 @@ paths:
                         category: Panel
                         list_price: '145.00'
                         price: '119.00'
-                        special: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                        special: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         weight_kg: '21.80'
                         images:
                           - https://cdn.shopify.com/s/files/1/0000/0000/products/jkm-440n.jpg
                         updated_at: '2026-09-01T22:30:00Z'
                     next_cursor: eyJ1cGRhdGVkX2F0IjoiMjAyNi0wOS0wMVQyMjozMDowMFoiLCJza3UiOiJKS00tNDQwTi01NEhMNC1WIn0
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -366,10 +541,15 @@ paths:
       operationId: listInventory
       summary: List sellable inventory per metro
       description: |
-        Returns sellable quantity (on hand minus committed) per metro for every
-        SKU in this channel's catalogue that has stock. The figures are exactly
-        the ones the Solar Outlet storefront sells from, refreshed on the same
-        schedule.
+        Returns sellable quantity (on hand minus committed) per metro for
+        every SKU the inventory feed carries stock for. The figures are
+        exactly the ones the Solar Outlet storefront sells from, refreshed on
+        the same schedule.
+
+        Inventory is not scoped per channel in stage 1: the feed is one set of
+        figures shared by every channel, so this listing can contain a SKU
+        that is not in your catalogue. Join to `/v1/catalogue` if you need
+        only the products you can buy.
 
         * `locations` lists every metro the service knows about. `available`
           on each item only contains metros with a non zero quantity.
@@ -428,12 +608,12 @@ paths:
                         total: 0
                         updated_at: '2026-09-02T04:08:40Z'
                     next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -448,9 +628,14 @@ paths:
       summary: Get sellable inventory for one SKU
       description: |
         Returns the per metro sellable quantity for one SKU together with the
-        feed timestamps. A SKU that exists in the catalogue but has no stock
-        anywhere returns `200` with `total: 0`; a SKU that is not in this
-        channel's catalogue returns `404 NOT_FOUND`.
+        feed timestamps.
+
+        Any SKU returns `200`. One with no stock anywhere, and one the
+        inventory feed has never heard of, both come back with `total: 0` and
+        an empty `available` map: the endpoint answers "how much can I sell",
+        and the answer for an unknown SKU is none. There is deliberately no
+        `404`, so this call cannot be used to test whether a SKU exists. Use
+        `GET /v1/catalogue/{sku}`, which does `404`, for catalogue membership.
       parameters:
         - $ref: '#/components/parameters/sku'
       responses:
@@ -472,6 +657,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/InventoryItemDetail'
               examples:
+                unknownSku:
+                  summary: A SKU the feed has never seen answers 200 with zero stock
+                  value:
+                    as_of: '2026-09-02T04:10:11Z'
+                    as_of_oldest: '2026-09-02T03:55:00Z'
+                    stale: false
+                    locations: [Sydney, Melbourne, Brisbane, Perth, Adelaide, Townsville]
+                    sku: GW-5000-DNS-99
+                    available: {}
+                    total: 0
+                    updated_at: '2026-09-02T04:10:11Z'
                 inStock:
                   summary: Stock in two metros
                   value:
@@ -489,8 +685,6 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -505,20 +699,30 @@ paths:
       summary: List specials granted to this channel
       description: |
         Returns active and upcoming specials granted to this channel, one row
-        per SKU. A campaign covering several SKUs appears as several rows
-        sharing the same `name`.
+        per SKU, oldest window first. A campaign covering several SKUs appears
+        as several rows sharing the same `name`.
 
-        A special is either an absolute `special_price` or a `percent_off` the
-        list price; exactly one of the two is non null. `effective_price` is
-        the resulting price for this channel and is always populated, so most
-        clients only need that field. Ended specials are not returned, except
-        through `updated_since` where a row whose window has closed since your
-        last sync is returned once so you can remove it.
+        `kind` says which sort of special it is: `price` carries an absolute
+        `special_price` and a null `percent_off`, `percent` carries a
+        `percent_off` and a null `special_price`. `effective_price` is the
+        resulting price for this channel, and is `null` when the SKU is not an
+        active catalogue product for you: there is then no list price to
+        resolve a percentage against. `active` is `true` for the rows whose
+        window includes the current instant, and `false` for rows that have
+        not started yet.
+
+        A special whose window has closed is not returned at all, including
+        under `updated_since`. Reconcile removals by treating the response as
+        the complete set of your live and upcoming specials: anything you hold
+        that is not in a full walk has ended.
 
         Granted specials are already folded into `price` on the catalogue, so
         this endpoint is for display (badges, countdowns, campaign pages) and
         for knowing when a price will change. Pass `active=true` to restrict
-        the list to specials live right now.
+        the list to specials live right now, and `sku` to restrict to one
+        product.
+
+        Supports cursor pagination and `updated_since`; see the introduction.
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -555,35 +759,39 @@ paths:
                 $ref: '#/components/schemas/SpecialsList'
               examples:
                 twoSpecials:
-                  summary: One absolute price special and one percentage special
+                  summary: One live absolute price special and one upcoming percentage special
                   value:
                     as_of: '2026-09-02T04:00:00Z'
                     items:
-                      - id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                      - id: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         name: September panel clearance
                         sku: JKM-440N-54HL4-V
+                        kind: price
                         special_price: '119.00'
                         percent_off: null
                         effective_price: '119.00'
+                        active: true
                         starts_at: '2026-09-01T00:00:00Z'
                         ends_at: '2026-09-30T13:59:59Z'
                         updated_at: '2026-08-29T02:15:00Z'
-                      - id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PE
+                      - id: spc_01j6zk3m5x8qw2r7y9v4b1n0pe
                         name: October inverter promo
                         sku: GW-5000-DNS-30
+                        kind: percent
                         special_price: null
-                        percent_off: '15.00'
+                        percent_off: 15
                         effective_price: '1049.33'
+                        active: false
                         starts_at: '2026-10-01T00:00:00Z'
                         ends_at: '2026-10-31T12:59:59Z'
                         updated_at: '2026-09-02T04:00:00Z'
                     next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -614,18 +822,34 @@ paths:
 
         ## Origin
 
-        Partners have no fulfilment location concept. The origin is the metro
-        that can fulfil every line from stock, falling back to Sydney. You may
-        pass `origin_metro` to force a particular origin, for example when the
-        end customer will collect. The metro actually used is returned in
-        `origin_metro`.
+        Partners have no fulfilment location concept, and the API does not
+        choose an origin from stock. Every quote is priced from one configured
+        default metro, Sydney, unless you pass `origin_metro`, in which case
+        it is priced from the metro you name. Nothing checks that the origin
+        can actually fulfil the lines.
+
+        This has a money consequence for interstate carts. A Perth cart quoted
+        from the Sydney default is priced as a cross country consignment even
+        when the goods would ship from Perth. If you know where the stock is,
+        read `/v1/inventory` and pass `origin_metro`; if you do not, quote the
+        default and expect the freight figure to be conservative.
+
+        The metro actually used is returned in `origin_metro`.
 
         ## Validity
 
-        A quote expires at `expires_at` (typically 30 minutes). It is bound to
-        the exact lines, quantities and destination it was requested with; an
-        order that references it with different lines or a different address is
-        refused with `422 VALIDATION_FAILED`.
+        A quote expires at `expires_at`, 30 minutes after it was created. It is
+        bound to the exact lines, quantities, destination and address type it
+        was requested with, and to the key's channel and sandbox side; an order
+        that references it with anything different is refused with
+        `422 VALIDATION_FAILED`.
+
+        Requesting a quote for a cart the API has just quoted returns the same
+        `quote_id` again rather than a fresh one, for as long as it has at
+        least five minutes of life left. Duplicate quotes for an unchanged cart
+        are therefore free, but the clock does not restart: always read
+        `expires_at` off the response you have rather than assuming 30 minutes
+        from now.
       requestBody:
         required: true
         content:
@@ -680,7 +904,7 @@ paths:
                 priced:
                   summary: Two rates available
                   value:
-                    quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pd
                     quote_status: priced
                     expires_at: '2026-09-02T04:45:00Z'
                     origin_metro: Sydney
@@ -704,7 +928,7 @@ paths:
                 manualQuote:
                   summary: Pallet quantity needs a manual quote
                   value:
-                    quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PE
+                    quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pe
                     quote_status: manual_quote_required
                     expires_at: '2026-09-02T04:45:00Z'
                     origin_metro: Sydney
@@ -712,15 +936,19 @@ paths:
                 unavailable:
                   summary: Destination cannot be serviced
                   value:
-                    quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PF
+                    quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pf
                     quote_status: unavailable
-                    expires_at: null
+                    expires_at: '2026-09-02T04:45:00Z'
                     origin_metro: Sydney
                     rates: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationFailed'
         '429':
@@ -740,20 +968,32 @@ paths:
         name, phone and address are delivery details only; they are never used
         to create or match a customer record.
 
-        ## What is validated synchronously
+        ## What is validated
 
-        1. Every `sku` exists and is active in this channel's catalogue.
-        2. Every `quantity` is between 1 and 9999.
-        3. Every `unit_price` equals the channel's current price for that SKU
+        Everything below happens before the response is written; nothing about
+        acceptance is deferred.
+
+        1. The body parses, carries no unknown fields, and is under 64 KiB.
+           A parse failure or an unknown field is `400`, an oversized body is
+           `413`.
+        2. Every field is within its length limit, the delivery postcode is
+           four digits, the state is an Australian state or territory code,
+           and `country` is `AU` (the only value supported). A missing
+           `country` defaults to `AU`.
+        3. Line SKUs are distinct. Two lines for the same SKU are refused
+           rather than merged: send one line with the combined quantity. Every
+           `quantity` is between 1 and 9999, and there are at most 200 lines.
+        4. Every `sku` exists and is active in this channel's catalogue.
+        5. Every `unit_price` equals the channel's current price for that SKU
            **and** `price_list_version` equals the current version. Otherwise
            `409 PRICE_CHANGED` is returned with the current values in
            `details`; refresh the catalogue and resubmit.
-        4. `quote_id` is valid, unexpired, was issued for the same lines and
-           destination, and `rate_service_code` is one of its rates. Otherwise
-           `422 VALIDATION_FAILED`.
-        5. `client_reference` has not been used by this channel with a
-           different body, otherwise `409 IDEMPOTENCY_CONFLICT`. The same body
-           returns the original receipt.
+        6. `quote_id` is valid, unexpired, was issued by this channel with a
+           key on this side of the sandbox boundary, for the same lines,
+           destination and address type, and `rate_service_code` is one of its
+           rates. Otherwise `422 VALIDATION_FAILED`.
+        7. `client_reference` has not been used by this channel with a
+           different body, otherwise `409 IDEMPOTENCY_CONFLICT`.
 
         Totals are computed server side from the current price list and the
         chosen rate. The response is authoritative; do not trust client side
@@ -761,11 +1001,20 @@ paths:
 
         ## What happens next
 
-        The order is returned with status `received` and a `202` because
-        acceptance is asynchronous. It normally moves to `accepted` within
-        seconds. Account level checks (credit hold, unapproved account) run in
-        the back office and surface as `on_hold` or `rejected`. Poll
-        `GET /v1/orders/{id}` (using `If-None-Match`) or
+        Acceptance is synchronous. A `202` response already carries status
+        `accepted` and two events, `received` and `accepted`: everything the
+        API can check has been checked and the order is queued for operations.
+        The status is `202` rather than `200` because fulfilment has not
+        started, not because validation is still running.
+
+        Resubmitting the same `client_reference` with the same body returns
+        `200` with the order that already exists, at whatever status it has
+        reached by then. Treat `200` and `202` the same way: read the order
+        out of the body.
+
+        Account level checks (credit hold, unapproved account) and stock
+        allocation run in the back office afterwards and surface as `on_hold`
+        or `rejected`. Poll `GET /v1/orders/{id}` (using `If-None-Match`) or
         `GET /v1/orders?updated_since=` to track it. The full state machine is
         documented on the `Order` schema.
       parameters:
@@ -781,21 +1030,22 @@ paths:
                 summary: A two line order using a priced quote
                 value:
                   client_reference: PO-88213
-                  price_list_version: '2026-09-02T04:00:00Z'
-                  quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  price_list_version: plv_9f3a2c1d84b6e05
+                  quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pd
                   rate_service_code: ALLIED-GENERAL
                   delivery:
                     name: Jane Citizen
-                    company: null
+                    company: Example Solar Pty Ltd
                     phone: '+61400000000'
                     email: jane@example.com
                     address1: 12 Example Street
-                    address2: null
+                    address2: Unit 4
                     suburb: Parramatta
                     postcode: '2150'
                     state: NSW
                     country: AU
                     instructions: Leave at side gate if no answer
+                    address_type: business
                   lines:
                     - sku: GW-5000-DNS-30
                       quantity: 1
@@ -805,11 +1055,32 @@ paths:
                       unit_price: '119.00'
                   partner_note: Installer job 4471
       responses:
+        '200':
+          description: |
+            This `client_reference` has already been used by this channel with
+            the same body, so no second order was created. The body is the
+            existing order at its current status.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
         '202':
           description: |
-            The order has been received and recorded. Its status is `received`
-            until asynchronous acceptance completes. Resubmitting the same
-            `client_reference` with the same body returns this same receipt.
+            The order has been validated, priced and recorded with status
+            `accepted`. `202` says fulfilment has not started, not that
+            validation is outstanding. A replay of the same
+            `client_reference` and body answers `200`, not `202`.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/X-Request-Id'
@@ -823,73 +1094,77 @@ paths:
               description: URL of the created order.
               schema:
                 type: string
-                examples: [/v1/orders/ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+                examples: [/v1/orders/ord_01j6zk3m5x8qw2r7y9v4b1n0pd]
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
               examples:
-                received:
-                  summary: Receipt immediately after submission
+                accepted:
+                  summary: The order immediately after submission
                   value:
-                    id: ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD
-                    channel_id: ch_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    id: ord_01j6zk3m5x8qw2r7y9v4b1n0pd
+                    channel_id: ch_01j6zk3m5x8qw2r7y9v4b1n0pd
+                    api_key_id: key_01j6zk3m5x8qw2r7y9v4b1n0pd
                     client_reference: PO-88213
-                    status: received
-                    price_list_version: '2026-09-02T04:00:00Z'
+                    status: accepted
+                    price_list_version: plv_9f3a2c1d84b6e05
                     currency: AUD
                     subtotal: '2538.99'
                     shipping_total: '123.45'
                     gst: '266.24'
                     total: '2928.68'
-                    quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pd
                     rate_service_code: ALLIED-GENERAL
                     delivery:
                       name: Jane Citizen
-                      company: null
+                      company: Example Solar Pty Ltd
                       phone: '+61400000000'
                       email: jane@example.com
                       address1: 12 Example Street
-                      address2: null
+                      address2: Unit 4
                       suburb: Parramatta
                       postcode: '2150'
                       state: NSW
                       country: AU
                       instructions: Leave at side gate if no answer
+                      address_type: business
                     lines:
                       - sku: GW-5000-DNS-30
                         title: GoodWe 5kW Single Phase Hybrid Inverter
                         quantity: 1
                         unit_price: '1110.99'
                         line_total: '1110.99'
-                        special_id: null
+                        special: null
                       - sku: JKM-440N-54HL4-V
                         title: Jinko Tiger Neo 440W N-Type Mono
                         quantity: 12
                         unit_price: '119.00'
                         line_total: '1428.00'
-                        special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                        special: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                     applied_specials:
-                      - special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                      - id: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         sku: JKM-440N-54HL4-V
-                        list_price: '145.00'
-                        effective_price: '119.00'
-                        quantity: 12
+                        unit_price: '119.00'
                     partner_note: Installer job 4471
                     sandbox: false
                     received_at: '2026-09-02T04:20:15Z'
                     updated_at: '2026-09-02T04:20:15Z'
                     events:
                       - status: received
-                        note: null
-                        actor: system
+                        note: order received
+                        actor: partner:key_01j6zk3m5x8qw2r7y9v4b1n0pd
                         created_at: '2026-09-02T04:20:15Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/OrderConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/ValidationFailed'
         '429':
@@ -903,10 +1178,25 @@ paths:
       operationId: listOrders
       summary: List this channel's orders
       description: |
-        Returns orders placed with this channel's keys, newest first, cursor
-        paginated. Filter by `status` and use `updated_since` to poll for
-        status changes efficiently: pass the `as_of` from your last response
-        and you receive every order whose status or details changed since.
+        Returns orders placed with this channel's keys, cursor paginated,
+        **oldest first by `updated_at`**. The order is deliberate: it is what
+        makes the `updated_since` sync loop work, because a walk that starts
+        at the oldest change and pages forward cannot skip an order that
+        changes while you are paging.
+
+        Filter by `status` and use `updated_since` to poll for status changes
+        efficiently: pass the `as_of` from the last page you read and you
+        receive every order whose status or details changed at or after it.
+        `as_of` is the newest `updated_at` on the page, so the order you
+        already have comes back once more on the next poll; match on `id` and
+        skip it.
+
+        Pass `client_reference` to fetch the single order carrying your own
+        reference, which is how to find an order again after a request timed
+        out before you saw its `id`.
+
+        A key only ever lists its own side of the sandbox boundary: a
+        `sj_test_` key sees sandbox orders, a `sj_live_` key sees live ones.
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -944,71 +1234,71 @@ paths:
                 page:
                   summary: One accepted order, no further pages
                   value:
-                    as_of: '2026-09-02T04:21:02Z'
+                    as_of: '2026-09-02T04:20:16Z'
                     items:
-                      - id: ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD
-                        channel_id: ch_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                      - id: ord_01j6zk3m5x8qw2r7y9v4b1n0pd
+                        channel_id: ch_01j6zk3m5x8qw2r7y9v4b1n0pd
+                        api_key_id: key_01j6zk3m5x8qw2r7y9v4b1n0pd
                         client_reference: PO-88213
                         status: accepted
-                        price_list_version: '2026-09-02T04:00:00Z'
+                        price_list_version: plv_9f3a2c1d84b6e05
                         currency: AUD
                         subtotal: '2538.99'
                         shipping_total: '123.45'
                         gst: '266.24'
                         total: '2928.68'
-                        quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                        quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pd
                         rate_service_code: ALLIED-GENERAL
                         delivery:
                           name: Jane Citizen
-                          company: null
+                          company: Example Solar Pty Ltd
                           phone: '+61400000000'
                           email: jane@example.com
                           address1: 12 Example Street
-                          address2: null
+                          address2: Unit 4
                           suburb: Parramatta
                           postcode: '2150'
                           state: NSW
                           country: AU
                           instructions: Leave at side gate if no answer
+                          address_type: business
                         lines:
                           - sku: GW-5000-DNS-30
                             title: GoodWe 5kW Single Phase Hybrid Inverter
                             quantity: 1
                             unit_price: '1110.99'
                             line_total: '1110.99'
-                            special_id: null
+                            special: null
                           - sku: JKM-440N-54HL4-V
                             title: Jinko Tiger Neo 440W N-Type Mono
                             quantity: 12
                             unit_price: '119.00'
                             line_total: '1428.00'
-                            special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                            special: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         applied_specials:
-                          - special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                          - id: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                             sku: JKM-440N-54HL4-V
-                            list_price: '145.00'
-                            effective_price: '119.00'
-                            quantity: 12
+                            unit_price: '119.00'
                         partner_note: Installer job 4471
                         sandbox: false
                         received_at: '2026-09-02T04:20:15Z'
                         updated_at: '2026-09-02T04:20:16Z'
                         events:
                           - status: received
-                            note: null
-                            actor: system
+                            note: order received
+                            actor: partner:key_01j6zk3m5x8qw2r7y9v4b1n0pd
                             created_at: '2026-09-02T04:20:15Z'
                           - status: accepted
-                            note: null
+                            note: validation passed
                             actor: system
                             created_at: '2026-09-02T04:20:16Z'
                     next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '422':
-          $ref: '#/components/responses/ValidationFailed'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1051,65 +1341,64 @@ paths:
                 processing:
                   summary: Order keyed by operations and now processing
                   value:
-                    id: ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD
-                    channel_id: ch_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    id: ord_01j6zk3m5x8qw2r7y9v4b1n0pd
+                    channel_id: ch_01j6zk3m5x8qw2r7y9v4b1n0pd
                     client_reference: PO-88213
                     status: processing
-                    price_list_version: '2026-09-02T04:00:00Z'
+                    price_list_version: plv_9f3a2c1d84b6e05
                     currency: AUD
                     subtotal: '2538.99'
                     shipping_total: '123.45'
                     gst: '266.24'
                     total: '2928.68'
-                    quote_id: qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    quote_id: qt_01j6zk3m5x8qw2r7y9v4b1n0pd
                     rate_service_code: ALLIED-GENERAL
                     delivery:
                       name: Jane Citizen
-                      company: null
+                      company: Example Solar Pty Ltd
                       phone: '+61400000000'
                       email: jane@example.com
                       address1: 12 Example Street
-                      address2: null
+                      address2: Unit 4
                       suburb: Parramatta
                       postcode: '2150'
                       state: NSW
                       country: AU
                       instructions: Leave at side gate if no answer
+                      address_type: business
                     lines:
                       - sku: GW-5000-DNS-30
                         title: GoodWe 5kW Single Phase Hybrid Inverter
                         quantity: 1
                         unit_price: '1110.99'
                         line_total: '1110.99'
-                        special_id: null
+                        special: null
                       - sku: JKM-440N-54HL4-V
                         title: Jinko Tiger Neo 440W N-Type Mono
                         quantity: 12
                         unit_price: '119.00'
                         line_total: '1428.00'
-                        special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                        special: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                     applied_specials:
-                      - special_id: spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                      - id: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         sku: JKM-440N-54HL4-V
-                        list_price: '145.00'
-                        effective_price: '119.00'
-                        quantity: 12
+                        unit_price: '119.00'
                     partner_note: Installer job 4471
                     sandbox: false
                     received_at: '2026-09-02T04:20:15Z'
                     updated_at: '2026-09-02T06:02:40Z'
                     events:
                       - status: received
-                        note: null
-                        actor: system
+                        note: order received
+                        actor: partner:key_01j6zk3m5x8qw2r7y9v4b1n0pd
                         created_at: '2026-09-02T04:20:15Z'
                       - status: accepted
-                        note: null
+                        note: validation passed
                         actor: system
                         created_at: '2026-09-02T04:20:16Z'
                       - status: processing
                         note: Keyed to NetSuite SO-104233
-                        actor: ops
+                        actor: ops:alex@solarjuice.com.au
                         created_at: '2026-09-02T06:02:40Z'
         '304':
           description: Not modified since the `If-None-Match` value. No body.
@@ -1135,20 +1424,44 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
-  /v1/health:
-    get:
-      tags: [Health]
-      operationId: getHealth
-      summary: Liveness check
+  /v1/orders/{id}/cancel:
+    post:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Cancel an order before it reaches operations
       description: |
-        Unauthenticated. Returns `200 {"status": "ok"}` when the API process is
-        up and serving. It does not report the freshness of catalogue or
-        inventory data; use the `stale` flag and `as_of` on inventory responses
-        for that. Rate limited by client IP.
-      security: []
+        Cancels one of this channel's own orders. Requires the `orders:write`
+        scope.
+
+        A partner may cancel while the order is `received`, `accepted` or
+        `on_hold`, which in practice means before operations key it into the
+        fulfilment system. Once it is `processing`, `dispatched`, `cancelled`
+        or `rejected` the API refuses and the cancellation has to go through
+        your account manager. There is no un-cancel: `cancelled` is terminal.
+
+        The body is optional. Send `{"note": "..."}` to record why; with no
+        body the event note is recorded as `cancelled by partner`.
+
+        The response is the order at its new status, with the cancellation
+        appended to `events`. It is safe to call twice only in the sense that
+        the second call is refused with `422`, not that it does anything: check
+        `status` on the order you already hold before calling.
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCancelRequest'
+            examples:
+              withNote:
+                summary: Cancel with a reason
+                value:
+                  note: Customer changed the panel selection
       responses:
         '200':
-          description: The service is up.
+          description: The order, now `cancelled`.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/X-Request-Id'
@@ -1158,6 +1471,89 @@ paths:
               $ref: '#/components/headers/RateLimit-Remaining'
             RateLimit-Reset:
               $ref: '#/components/headers/RateLimit-Reset'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The order moved while this request was in flight, so the
+            cancellation was not applied. `details` carries the status the
+            order actually holds. Re-read the order and decide again.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                raced:
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: order status changed while this request was in flight; re-read the order and retry
+                      details:
+                        - status: processing
+                          expected: accepted
+                          requested: cancelled
+                      request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+        '422':
+          description: |
+            The order is past the point a partner can cancel it, or the note
+            is not valid JSON object content.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                tooLate:
+                  value:
+                    error:
+                      code: VALIDATION_FAILED
+                      message: order is already processing and cannot be cancelled by the partner
+                      details: []
+                      request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness check
+      description: |
+        Unauthenticated. Returns `200 {"status": "ok"}` when the API process is
+        up and serving. It does not report the freshness of catalogue or
+        inventory data; use the `stale` flag and `as_of` on inventory responses
+        for that.
+
+        This operation sits outside the authenticated surface, so unlike every
+        other operation it carries no `RateLimit-*` headers and never answers
+        `429`. It is a liveness probe, not a service: do not poll it in place
+        of the endpoint you actually want.
+      security: []
+      responses:
+        '200':
+          description: The service is up.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
           content:
             application/json:
               schema:
@@ -1166,8 +1562,6 @@ paths:
                 ok:
                   value:
                     status: ok
-        '429':
-          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -1188,7 +1582,9 @@ components:
     limit:
       name: limit
       in: query
-      description: Page size. Default 100, maximum 500.
+      description: |
+        Page size. Default 100, maximum 500. A larger value is clamped to 500
+        rather than refused; a value that is not a positive integer is `400`.
       required: false
       schema:
         type: integer
@@ -1232,13 +1628,17 @@ components:
       required: false
       schema:
         type: string
-        examples: ['"a1b2c3d4e5f6"']
+        examples: ['W/"a1b2c3d4e5f60718"']
     idempotencyKey:
       name: Idempotency-Key
       in: header
       description: |
-        Optional. Recorded with the order for your own reconciliation. The
-        idempotency key that governs behaviour is `client_reference` in the body.
+        Accepted and ignored. It is here so that a generic HTTP client that
+        sets the header on every unsafe request is not rejected; the API does
+        not read it, store it, compare it or return it. `client_reference` in
+        the body is the only idempotency key, and sending this header instead
+        of one will not deduplicate anything.
+      deprecated: true
       required: false
       schema:
         type: string
@@ -1275,7 +1675,11 @@ components:
         minimum: 1
         examples: [30]
     X-Price-List-Version:
-      description: Version of the price list the response was priced from. Submit it as `price_list_version` on orders.
+      description: |
+        Opaque version of the price list the response was priced from. Submit
+        it as `price_list_version` on orders, and watch it for price changes:
+        it is the only signal that catches a price moving because a special
+        started or a discount changed, neither of which touches `updated_at`.
       schema:
         $ref: '#/components/schemas/PriceListVersion'
     X-Inventory-As-Of:
@@ -1283,10 +1687,13 @@ components:
       schema:
         $ref: '#/components/schemas/Timestamp'
     ETag:
-      description: Entity tag for the order representation. Send back in `If-None-Match`.
+      description: |
+        Weak entity tag for the order representation, derived from its id and
+        `updated_at`. Send it back verbatim in `If-None-Match`, `W/` prefix
+        included.
       schema:
         type: string
-        examples: ['"a1b2c3d4e5f6"']
+        examples: ['W/"a1b2c3d4e5f60718"']
 
   responses:
     Unauthorized:
@@ -1309,9 +1716,9 @@ components:
               value:
                 error:
                   code: UNAUTHORIZED
-                  message: API key is missing, invalid or revoked.
+                  message: api key is missing, invalid or revoked
                   details: []
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     Forbidden:
       description: The key does not have the scope for this operation, or the channel is suspended.
       headers:
@@ -1332,11 +1739,9 @@ components:
               value:
                 error:
                   code: FORBIDDEN
-                  message: This key does not have the orders:write scope.
-                  details:
-                    - field: scope
-                      message: orders:write required
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  message: this key does not have the orders:write scope
+                  details: []
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     NotFound:
       description: No such resource for this channel.
       headers:
@@ -1357,9 +1762,9 @@ components:
               value:
                 error:
                   code: NOT_FOUND
-                  message: SKU GW-5000-DNS-99 is not in this channel's catalogue.
+                  message: 'no such sku: GW-5000-DNS-99'
                   details: []
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     ValidationFailed:
       description: The request did not validate. `details` lists every problem found.
       headers:
@@ -1377,25 +1782,124 @@ components:
             $ref: '#/components/schemas/ErrorEnvelope'
           examples:
             badQuantity:
-              summary: Quantity out of range
+              summary: Quantity out of range, and a duplicated SKU
               value:
                 error:
                   code: VALIDATION_FAILED
-                  message: Request body is invalid.
+                  message: order request is invalid
                   details:
                     - field: lines[1].quantity
-                      message: must be between 1 and 9999
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
-            quoteMismatch:
-              summary: Quote does not match the order lines
+                      reason: must be 1..9999
+                    - field: lines[2].sku
+                      reason: duplicate sku; merge quantities into one line
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+            badAddress:
+              summary: The postcode and state do not check out
               value:
                 error:
                   code: VALIDATION_FAILED
-                  message: quote_id was issued for different lines or destination.
+                  message: order request is invalid
+                  details:
+                    - field: delivery.postcode
+                      reason: must be 4 digits
+                    - field: delivery.state
+                      reason: must be an Australian state or territory code
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+            quoteMismatch:
+              summary: The quote was computed for a different cart
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: quote was computed for different lines or destination; request a new quote
                   details:
                     - field: quote_id
-                      message: quote lines do not match order lines
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+            unorderableSku:
+              summary: A line names a SKU this channel cannot buy
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: one or more skus are not orderable
+                  details:
+                    - sku: GW-5000-DNS-99
+                      reason: unknown or inactive sku
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+    BadRequest:
+      description: |
+        The request could not be read, or a query parameter could not be
+        parsed. The code is `VALIDATION_FAILED` at status `400` rather than
+        `422`, because nothing about the request was understood well enough to
+        validate. This is what a malformed JSON body, a body that is not a
+        single JSON value, a field of the wrong JSON type, an unknown field, a
+        `limit` that is not a positive integer, a `cursor` the API did not
+        issue and an unparsable `updated_since` all return.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            unknownField:
+              summary: A misspelled field is refused rather than ignored
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: unknown field "deliverry"
+                  details:
+                    - field: deliverry
+                      reason: unknown field
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+            malformedJson:
+              summary: The body is not JSON
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: malformed JSON at offset 42
+                  details: []
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+            badCursor:
+              summary: A cursor the API did not issue
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: cursor is not valid
+                  details: []
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
+    PayloadTooLarge:
+      description: |
+        The request body is over the limit for this operation: 64 KiB on
+        `POST /v1/orders`, 1 MiB elsewhere. An order of 200 lines with full
+        delivery details is a few KiB, so this normally means a runaway
+        client rather than a large order.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            tooLarge:
+              value:
+                error:
+                  code: VALIDATION_FAILED
+                  message: request body exceeds 64 KiB
+                  details: []
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     RateLimited:
       description: The key's allowance for the current window is exhausted.
       headers:
@@ -1418,9 +1922,9 @@ components:
               value:
                 error:
                   code: RATE_LIMITED
-                  message: Rate limit of 600 requests per minute exceeded.
+                  message: rate limit exceeded
                   details: []
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     OrderConflict:
       description: |
         Either the prices submitted no longer match the channel's current price
@@ -1444,30 +1948,29 @@ components:
             $ref: '#/components/schemas/ErrorEnvelope'
           examples:
             priceChanged:
-              summary: A line price and the version are both out of date
+              summary: The version is out of date and one line has moved
               value:
                 error:
                   code: PRICE_CHANGED
-                  message: One or more prices no longer match the current price list.
+                  message: prices or price list version have changed; refresh the catalogue and resubmit
                   details:
-                    - field: lines[0].unit_price
-                      sku: GW-5000-DNS-30
-                      submitted: '1110.99'
-                      current: '1099.00'
-                    - field: price_list_version
-                      submitted: '2026-09-01T22:00:00Z'
-                      current: '2026-09-02T04:00:00Z'
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    - price_list_version: plv_4c81ba09e7d2f6
+                      current_price_list_version: plv_9f3a2c1d84b6e05
+                    - sku: GW-5000-DNS-30
+                      unit_price: '1110.99'
+                      current_price: '1099.00'
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
             idempotencyConflict:
               summary: client_reference reused with a different body
               value:
                 error:
                   code: IDEMPOTENCY_CONFLICT
-                  message: client_reference PO-88213 was already submitted with a different body.
+                  message: client_reference was already used for a different order request
                   details:
-                    - field: client_reference
-                      message: existing order ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                    - order_id: ord_01j6zk3m5x8qw2r7y9v4b1n0pd
+                      client_reference: PO-88213
+                      status: accepted
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     QuoteUnavailable:
       description: The freight engine is temporarily unreachable. Retry after the `Retry-After` delay.
       headers:
@@ -1490,14 +1993,16 @@ components:
               value:
                 error:
                   code: QUOTE_UNAVAILABLE
-                  message: Freight quoting is temporarily unavailable.
+                  message: shipping quote is unavailable, retry shortly
                   details: []
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     StaleData:
       description: |
-        The catalogue or inventory data behind this request is older than the
-        safety threshold, or has not been loaded yet, and the operation cannot
-        be served safely. Retry after the `Retry-After` delay.
+        The instance that answered has no catalogue or inventory document
+        loaded, so it has nothing to serve this operation from. It is a
+        transient condition, normally a few seconds after a deployment or a
+        read model publish, not a data age threshold. Retry after the
+        `Retry-After` delay.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/X-Request-Id'
@@ -1518,11 +2023,9 @@ components:
               value:
                 error:
                   code: STALE_DATA
-                  message: Catalogue data is older than the safety threshold; orders are paused.
-                  details:
-                    - field: catalogue.as_of
-                      current: '2026-09-02T01:10:11Z'
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  message: catalogue read model is not loaded
+                  details: []
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     Internal:
       description: Unexpected failure. Retry with backoff; report the `request_id` if it persists.
       headers:
@@ -1543,9 +2046,9 @@ components:
               value:
                 error:
                   code: INTERNAL
-                  message: An unexpected error occurred.
+                  message: internal error
                   details: []
-                  request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+                  request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
 
   schemas:
     # Primitives
@@ -1557,10 +2060,15 @@ components:
       examples: ['1234.50']
 
     Percent:
-      type: string
-      description: Percentage as a decimal string with two decimal places, for example `"15.00"` for 15 percent.
-      pattern: '^[0-9]+\.[0-9]{2}$'
-      examples: ['15.00']
+      type: number
+      description: |
+        Percentage as a JSON number with at most two decimal places: `15` for
+        15 percent, `12.5` for 12.5 percent. Money is a decimal string and
+        percentages are numbers; the two do not follow the same rule.
+      minimum: 0
+      maximum: 100
+      multipleOf: 0.01
+      examples: [15]
 
     Timestamp:
       type: string
@@ -1570,14 +2078,20 @@ components:
 
     PriceListVersion:
       type: string
-      format: date-time
       description: |
-        Identifies the channel's current price list. It is the ISO 8601 timestamp
-        of the most recent change to any input of the channel's prices (base
-        prices, channel discount, per SKU overrides, granted specials) and changes
-        whenever any of them changes. Treat it as opaque: compare for equality,
-        never for ordering.
-      examples: ['2026-09-02T04:00:00Z']
+        Identifies the channel's current price list. It is an opaque token,
+        `plv_` followed by a short hexadecimal digest, derived from the
+        resolved price of every SKU in the channel's catalogue. It changes
+        whenever any of those prices changes, whatever the cause: a base
+        price edit, a change to the channel discount, a per SKU override, or
+        a special starting or ending.
+
+        It is not a timestamp and carries no ordering. Compare two values for
+        equality only; a difference means re-read the catalogue, it does not
+        mean one is newer. The format may change without notice, so store it
+        as an opaque string.
+      pattern: '^plv_[0-9a-f]{1,16}$'
+      examples: [plv_9f3a2c1d84b6e05]
 
     Sku:
       type: string
@@ -1594,33 +2108,33 @@ components:
     RequestId:
       type: string
       description: Request id, `req_` followed by a 26 character ULID.
-      pattern: '^req_[0-9A-HJKMNP-TV-Z]{26}$'
-      examples: [req_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+      pattern: '^req_[0-9a-hjkmnp-tv-z]{26}$'
+      examples: [req_01j6zk3m5x8qw2r7y9v4b1n0pd]
 
     OrderId:
       type: string
       description: Order id, `ord_` followed by a 26 character ULID.
-      pattern: '^ord_[0-9A-HJKMNP-TV-Z]{26}$'
-      examples: [ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+      pattern: '^ord_[0-9a-hjkmnp-tv-z]{26}$'
+      examples: [ord_01j6zk3m5x8qw2r7y9v4b1n0pd]
 
     ChannelId:
       type: string
       description: Channel id, `ch_` followed by a 26 character ULID. Identifies your sales channel.
-      pattern: '^ch_[0-9A-HJKMNP-TV-Z]{26}$'
-      examples: [ch_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+      pattern: '^ch_[0-9a-hjkmnp-tv-z]{26}$'
+      examples: [ch_01j6zk3m5x8qw2r7y9v4b1n0pd]
 
     SpecialId:
       type: string
       description: Special id, `spc_` followed by a 26 character ULID.
-      pattern: '^spc_[0-9A-HJKMNP-TV-Z]{26}$'
-      examples: [spc_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+      pattern: '^spc_[0-9a-hjkmnp-tv-z]{26}$'
+      examples: [spc_01j6zk3m5x8qw2r7y9v4b1n0pd]
 
     QuoteId:
       type: string
       description: Shipping quote id as returned by `POST /v1/shipping/quotes`. Opaque.
       minLength: 1
       maxLength: 64
-      examples: [qte_01J6ZK3M5X8QW2R7Y9V4B1N0PD]
+      examples: [qt_01j6zk3m5x8qw2r7y9v4b1n0pd]
 
     Metro:
       type: string
@@ -1666,29 +2180,33 @@ components:
     ErrorDetail:
       type: object
       description: |
-        One problem with the request. `field` is a JSON path into the request
-        body or the query parameter name. For `PRICE_CHANGED`, `submitted` and
-        `current` carry the value you sent and the value the API now holds.
-        Additional keys may be present.
+        One problem with the request. The keys depend on the error code, so
+        treat a detail as a diagnostic bag rather than a fixed shape, and
+        never branch on it where `code` would do.
+
+        * Field problems (`VALIDATION_FAILED`) carry `field`, a JSON path
+          into the request body or a query parameter name, and `reason`, a
+          short explanation. There is no `message` key on a detail.
+        * `PRICE_CHANGED` returns one object carrying `price_list_version`
+          and `current_price_list_version`, followed by one object per line
+          that moved, carrying `sku`, `unit_price` (what you sent) and
+          `current_price`.
+        * `IDEMPOTENCY_CONFLICT` returns one object carrying `order_id`,
+          `client_reference` and `status` for the order that already exists.
+        * An unorderable SKU returns `sku` and `reason`.
+
+        New keys may be added at any time.
       properties:
         field:
           type: string
           description: JSON path into the request body, or a query or header name.
           examples: ['lines[0].unit_price']
+        reason:
+          type: string
+          description: Short explanation of this detail.
+          examples: [must be 1..9999]
         sku:
           $ref: '#/components/schemas/Sku'
-        message:
-          type: string
-          description: Human readable explanation of this detail.
-          examples: [must be between 1 and 9999]
-        submitted:
-          type: string
-          description: The value you sent (PRICE_CHANGED).
-          examples: ['1110.99']
-        current:
-          type: string
-          description: The value the API currently holds (PRICE_CHANGED, STALE_DATA).
-          examples: ['1099.00']
       additionalProperties: true
 
     Error:
@@ -1719,9 +2237,9 @@ components:
       examples:
         - error:
             code: NOT_FOUND
-            message: SKU GW-5000-DNS-99 is not in this channel's catalogue.
+            message: 'no such sku: GW-5000-DNS-99'
             details: []
-            request_id: req_01J6ZK3M5X8QW2R7Y9V4B1N0PD
+            request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
 
     # Catalogue
 
@@ -1745,7 +2263,11 @@ components:
           examples: [Inverter]
         list_price:
           $ref: '#/components/schemas/Money'
-          description: Public list price, ex GST. The compare-at figure. Never below `price`.
+          description: |
+            Public list price, ex GST: the compare-at figure. It is normally
+            at or above `price`, but nothing enforces that, so a channel
+            override above list will show `price` higher than `list_price`.
+            Do not derive a discount badge without checking.
         price:
           $ref: '#/components/schemas/Money'
           description: This channel's price, ex GST, after channel discount, per SKU override and any granted special. Submit as `unit_price` on orders.
@@ -1755,9 +2277,12 @@ components:
             - type: 'null'
           description: Id of the granted special that produced `price`, or `null` when no special applies.
         weight_kg:
-          type: string
-          pattern: '^[0-9]+\.[0-9]{2}$'
-          description: Unit weight in kilograms, two decimal places.
+          type: [string, 'null']
+          pattern: '^[0-9]+(\.[0-9]+)?$'
+          description: |
+            Unit weight in kilograms as a decimal string, or `null` when the
+            product has no weight recorded. A product with no weight still
+            quotes freight, from its shipping specification.
           examples: ['18.50']
         images:
           type: array
@@ -1772,13 +2297,23 @@ components:
 
     CatalogueList:
       type: object
-      required: [as_of, price_list_version, items, next_cursor]
+      required: [as_of, price_list_version, stale, items, next_cursor]
       properties:
         as_of:
           $ref: '#/components/schemas/Timestamp'
-          description: Freshest source timestamp behind this page. Safe to pass as `updated_since` on the next sync.
+          description: |
+            When the catalogue document behind this page was published. Safe
+            to pass as `updated_since` on the next sync, but see the note in
+            the introduction: it will not pick up a price that moved because
+            a special started or a channel discount changed.
         price_list_version:
           $ref: '#/components/schemas/PriceListVersion'
+        stale:
+          type: boolean
+          description: |
+            True when the catalogue document is older than the configured
+            threshold. The prices are still served and orders are still
+            accepted; it is a freshness signal, not a stop.
         items:
           type: array
           items:
@@ -1826,8 +2361,10 @@ components:
           $ref: '#/components/schemas/Timestamp'
           description: Freshest source timestamp in the feed.
         as_of_oldest:
-          $ref: '#/components/schemas/Timestamp'
-          description: Stalest source timestamp in the feed.
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+          description: Stalest source timestamp in the feed, or `null` when the feed does not report one.
         stale:
           type: boolean
           description: True when the feed is older than the configured threshold (default two hours).
@@ -1854,7 +2391,9 @@ components:
         as_of:
           $ref: '#/components/schemas/Timestamp'
         as_of_oldest:
-          $ref: '#/components/schemas/Timestamp'
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
         stale:
           type: boolean
         locations:
@@ -1877,10 +2416,10 @@ components:
     Special:
       type: object
       description: |
-        A time boxed price for one SKU granted to this channel. Exactly one of
-        `special_price` and `percent_off` is non null; `effective_price` is the
-        resulting price either way.
-      required: [id, name, sku, special_price, percent_off, effective_price, starts_at, ends_at, updated_at]
+        A time boxed price for one SKU granted to this channel. `kind` says
+        which of `special_price` and `percent_off` is populated; the other is
+        always `null`.
+      required: [id, name, sku, kind, special_price, percent_off, effective_price, active, starts_at, ends_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/SpecialId'
@@ -1890,19 +2429,38 @@ components:
           examples: [September panel clearance]
         sku:
           $ref: '#/components/schemas/Sku'
+        kind:
+          type: string
+          description: |
+            `price` for an absolute special price, `percent` for a percentage
+            off the list price.
+          enum: [price, percent]
         special_price:
           oneOf:
             - $ref: '#/components/schemas/Money'
             - type: 'null'
-          description: Absolute special price ex GST, or `null` for a percentage special.
+          description: Absolute special price ex GST when `kind` is `price`, otherwise `null`.
         percent_off:
           oneOf:
             - $ref: '#/components/schemas/Percent'
             - type: 'null'
-          description: Percentage off list price, or `null` for an absolute price special.
+          description: Percentage off list price when `kind` is `percent`, otherwise `null`.
         effective_price:
-          $ref: '#/components/schemas/Money'
-          description: The price this special produces for this channel, ex GST.
+          oneOf:
+            - $ref: '#/components/schemas/Money'
+            - type: 'null'
+          description: |
+            The price this special produces for this channel, ex GST. `null`
+            when the SKU is not an active product in your catalogue, because
+            there is then no list price to apply the special to. A special can
+            be granted for a SKU you cannot buy, so check for `null` before
+            displaying a price.
+        active:
+          type: boolean
+          description: |
+            True when the current instant falls inside `[starts_at, ends_at]`.
+            False for a special that has not started yet; specials whose
+            window has closed are not returned at all.
         starts_at:
           $ref: '#/components/schemas/Timestamp'
         ends_at:
@@ -1910,6 +2468,10 @@ components:
           description: Inclusive end of the window.
         updated_at:
           $ref: '#/components/schemas/Timestamp'
+          description: |
+            When the special record itself last changed. It does not move when
+            the window opens or closes, so it cannot be used to detect a
+            special going live.
 
     SpecialsList:
       type: object
@@ -1917,6 +2479,7 @@ components:
       properties:
         as_of:
           $ref: '#/components/schemas/Timestamp'
+          description: The instant the specials were evaluated for `active` and for window filtering.
         items:
           type: array
           items:
@@ -2037,10 +2600,11 @@ components:
           type: string
           enum: [priced, manual_quote_required, unavailable]
         expires_at:
-          oneOf:
-            - $ref: '#/components/schemas/Timestamp'
-            - type: 'null'
-          description: When the quote can no longer be used on an order. `null` when `quote_status` is `unavailable`.
+          $ref: '#/components/schemas/Timestamp'
+          description: |
+            When the quote can no longer be used on an order. Always set,
+            including on `manual_quote_required` and `unavailable` quotes:
+            the id stays resolvable until then so support can look it up.
         origin_metro:
           $ref: '#/components/schemas/Metro'
           description: The metro the consignment was priced from.
@@ -2061,58 +2625,82 @@ components:
 
     DeliveryAddress:
       type: object
-      description: End customer delivery details. Used for the consignment only; never used to create or match a customer record.
-      required: [name, phone, address1, suburb, postcode, state]
+      description: |
+        End customer delivery details. Used for the consignment only; never
+        used to create or match a customer record.
+
+        Every string field here is optional in the JSON sense: omit it and it
+        is an empty string, never `null`. The API returns `""` for a field
+        that was not supplied, so a client that checks for `null` will not
+        find one. `name`, `address1`, `suburb`, `postcode` and `state` must be
+        non empty; the rest may be left out.
+      required: [name, address1, suburb, postcode, state]
       properties:
         name:
           type: string
           minLength: 1
-          maxLength: 100
+          maxLength: 200
           description: Recipient name.
           examples: [Jane Citizen]
         company:
-          type: [string, 'null']
-          maxLength: 100
+          type: string
+          maxLength: 200
           examples: [Example Solar Pty Ltd]
         phone:
           type: string
-          minLength: 6
-          maxLength: 20
-          description: Contact number for the carrier. E.164 or Australian local format.
+          maxLength: 200
+          description: |
+            Contact number for the carrier. Not validated and not required,
+            but a consignment without one is harder to deliver, so send it.
           examples: ['+61400000000']
         email:
-          type: [string, 'null']
-          format: email
-          description: Optional. Receives carrier tracking notifications if provided.
+          type: string
+          maxLength: 200
+          description: Optional. Receives carrier tracking notifications if provided. Not validated as an address.
           examples: [jane@example.com]
         address1:
           type: string
           minLength: 1
-          maxLength: 100
+          maxLength: 200
           examples: [12 Example Street]
         address2:
-          type: [string, 'null']
-          maxLength: 100
+          type: string
+          maxLength: 200
+          examples: [Unit 4]
         suburb:
           type: string
           minLength: 1
-          maxLength: 100
+          maxLength: 200
           examples: [Parramatta]
         postcode:
           type: string
           pattern: '^[0-9]{4}$'
+          description: Four digits. Checked the same way the shipping quote checks it.
           examples: ['2150']
         state:
           $ref: '#/components/schemas/AustralianState'
+          description: Accepted in any case and returned upper case.
         country:
           type: string
           enum: [AU]
           default: AU
+          description: Only `AU` is supported. Omitted, it defaults to `AU`.
         instructions:
-          type: [string, 'null']
-          maxLength: 500
+          type: string
+          maxLength: 1000
           description: Delivery instructions passed to the carrier.
           examples: [Leave at side gate if no answer]
+        address_type:
+          type: string
+          enum: [residential, business]
+          description: |
+            Load bearing, because residential and business deliveries price
+            differently. Omit it and the order adopts the address type the
+            quote was priced for, which is what the stored order then shows.
+            Send it and it must equal the quote's, or the order is refused
+            with `422 VALIDATION_FAILED`: quoting a business address and then
+            ordering to a residential one is a repricing, not a detail.
+          examples: [business]
 
     OrderLineRequest:
       type: object
@@ -2136,8 +2724,10 @@ components:
         client_reference:
           type: string
           minLength: 1
-          maxLength: 64
-          description: Your unique reference for this order (purchase order number). The idempotency key; unique per channel.
+          maxLength: 128
+          description: |
+            Your unique reference for this order (purchase order number). The
+            idempotency key, unique per channel per sandbox side.
           examples: [PO-88213]
         price_list_version:
           $ref: '#/components/schemas/PriceListVersion'
@@ -2147,6 +2737,7 @@ components:
           description: A `priced`, unexpired quote for exactly these lines and this delivery address.
         rate_service_code:
           type: string
+          maxLength: 200
           description: The `service_code` of the chosen rate on that quote.
           examples: [ALLIED-GENERAL]
         delivery:
@@ -2155,17 +2746,22 @@ components:
           type: array
           minItems: 1
           maxItems: 200
+          description: |
+            One entry per SKU. SKUs must be distinct: two lines for the same
+            SKU are refused with `422 VALIDATION_FAILED` rather than merged,
+            so combine the quantities yourself. This differs from
+            `POST /v1/shipping/quotes`, which does merge duplicates.
           items:
             $ref: '#/components/schemas/OrderLineRequest'
         partner_note:
-          type: [string, 'null']
+          type: string
           maxLength: 1000
-          description: Free text for Solar Juice operations. Not shown to the end customer.
+          description: Free text for Solar Juice operations. Not shown to the end customer. Empty string when not supplied, never `null`.
           examples: [Installer job 4471]
 
     OrderLine:
       type: object
-      required: [sku, title, quantity, unit_price, line_total, special_id]
+      required: [sku, title, quantity, unit_price, line_total, special]
       properties:
         sku:
           $ref: '#/components/schemas/Sku'
@@ -2183,28 +2779,29 @@ components:
         line_total:
           $ref: '#/components/schemas/Money'
           description: The `unit_price` multiplied by `quantity`, ex GST.
-        special_id:
+        special:
           oneOf:
             - $ref: '#/components/schemas/SpecialId'
             - type: 'null'
-          description: The special that set `unit_price`, or `null`.
+          description: |
+            Id of the special that set `unit_price`, or `null`. The field is
+            named `special`, matching the catalogue, not `special_id`.
 
     AppliedSpecial:
       type: object
-      description: A special that reduced a line on this order. Recorded for redemption accounting.
-      required: [special_id, sku, list_price, effective_price, quantity]
+      description: |
+        A special that set the price of a line on this order. Recorded for
+        redemption accounting. One entry per line that a special applied to;
+        the quantity and the list price are on the matching entry in `lines`.
+      required: [id, sku, unit_price]
       properties:
-        special_id:
+        id:
           $ref: '#/components/schemas/SpecialId'
         sku:
           $ref: '#/components/schemas/Sku'
-        list_price:
+        unit_price:
           $ref: '#/components/schemas/Money'
-        effective_price:
-          $ref: '#/components/schemas/Money'
-        quantity:
-          type: integer
-          minimum: 1
+          description: The ex GST unit price the special produced.
 
     OrderEvent:
       type: object
@@ -2214,13 +2811,20 @@ components:
         status:
           $ref: '#/components/schemas/OrderStatus'
         note:
-          type: [string, 'null']
-          description: Free text from the actor, for example a back office reference or a hold reason.
+          type: string
+          description: |
+            Free text from the actor, for example a back office reference or a
+            hold reason. Empty string when there is none, never `null`.
           examples: [Keyed to NetSuite SO-104233]
         actor:
           type: string
-          description: Who made the transition. Open enumeration.
-          enum: [system, ops, partner]
+          description: |
+            Who made the transition, as a prefixed identifier rather than a
+            fixed set of words: `system` for the API itself, `partner:<key
+            id>` for something you did with your own key, and `ops:<operator>`
+            for a Solar Juice operator. Match on the prefix before the colon,
+            and expect new prefixes.
+          examples: [partner:key_01j6zk3m5x8qw2r7y9v4b1n0pd, system, 'ops:alex@solarjuice.com.au']
         created_at:
           $ref: '#/components/schemas/Timestamp'
 
@@ -2244,8 +2848,8 @@ components:
 
         | Status | Meaning |
         |---|---|
-        | `received` | Recorded by the API. Synchronous validation passed. Acceptance is pending. |
-        | `accepted` | Passed all checks and is queued for operations. Reached within seconds in the normal case. |
+        | `received` | The first event on every order, recorded the instant the request arrived. An order is never returned in this status: acceptance happens in the same request, so it is already `accepted` by the time you see it. |
+        | `accepted` | Passed every check the API can make and is queued for operations. This is the status a successful `POST /v1/orders` returns. |
         | `on_hold` | Held by the back office, typically an account check (credit hold, unapproved account) or stock allocation. `events[].note` says why. Resolves to `processing` or `rejected`. |
         | `processing` | Operations have keyed the order into the fulfilment system. The order can no longer be cancelled through the API. |
         | `dispatched` | Goods have left the warehouse. Stage 1 sets this manually; carrier tracking is a later addition. |
@@ -2282,6 +2886,13 @@ components:
           $ref: '#/components/schemas/OrderId'
         channel_id:
           $ref: '#/components/schemas/ChannelId'
+        api_key_id:
+          type: string
+          description: |
+            The id of the key the order was placed with. Present on orders
+            placed through the API and absent on the rare order created
+            without a key, so treat it as optional.
+          examples: [key_01j6zk3m5x8qw2r7y9v4b1n0pd]
         client_reference:
           type: string
           examples: [PO-88213]
@@ -2321,7 +2932,8 @@ components:
           items:
             $ref: '#/components/schemas/AppliedSpecial'
         partner_note:
-          type: [string, 'null']
+          type: string
+          description: Empty string when none was supplied, never `null`.
         sandbox:
           type: boolean
           description: True for orders placed with `sj_test_` keys. Sandbox orders never reach operations.
@@ -2336,15 +2948,30 @@ components:
           items:
             $ref: '#/components/schemas/OrderEvent'
 
+    OrderCancelRequest:
+      type: object
+      description: Optional body for `POST /v1/orders/{id}/cancel`.
+      properties:
+        note:
+          type: string
+          maxLength: 1000
+          description: Why the order is being cancelled. Recorded on the event; defaults to `cancelled by partner`.
+          examples: [Customer changed the panel selection]
+      additionalProperties: false
+
     OrderList:
       type: object
       required: [as_of, items, next_cursor]
       properties:
         as_of:
           $ref: '#/components/schemas/Timestamp'
-          description: Safe to pass as `updated_since` on the next poll.
+          description: |
+            The newest `updated_at` on this page. Pass it as `updated_since`
+            on the next poll; the last order on this page comes back once
+            more, which is the price of never missing one.
         items:
           type: array
+          description: Oldest first by `updated_at`, then by `id`.
           items:
             $ref: '#/components/schemas/Order'
         next_cursor:

@@ -161,21 +161,28 @@ receipt["status"] # received, because acceptance is asynchronous
 
 ## Idempotency
 
-`orders.create` always sends an `Idempotency-Key` header: yours if you pass
-`idempotency_key:`, otherwise a UUID v4 generated for the call. The key that was
-sent is on the result, so it can be logged next to the order:
+`client_reference` in the body is the only idempotency key. Resubmitting the
+same reference with the same body returns the order that already exists (`200`
+rather than the first call's `202`); a different body raises
+`SolarJuice::PartnerApi::IdempotencyConflictError`. Sandbox and live keys have
+separate reference namespaces.
+
+`orders.create` also sends an `Idempotency-Key` header, yours if you pass
+`idempotency_key:` and a generated UUID v4 otherwise, and puts it on the
+result. The API accepts that header and ignores it: it is not stored, not
+compared and not returned, so it is a local correlation value for your own
+logs. After a create that timed out, find the order by your own reference
+instead:
 
 ```ruby
-receipt = client.orders.create(body)
-logger.info("order #{receipt['id']} idempotency_key=#{receipt.idempotency_key}")
+page = client.orders.list(client_reference: "PO-88213")
 ```
 
-On the API side, `client_reference` in the body is what makes the call
-idempotent. Resubmitting the same reference with the same body returns the
-original receipt; a different body raises
-`SolarJuice::PartnerApi::IdempotencyConflictError`.
-
-Shipping quotes are not idempotent. Every call returns a new `quote_id`.
+Shipping quotes are cached rather than idempotent. A repeated quote for an
+unchanged cart, destination and origin returns the same `quote_id` while it has
+at least five minutes of validity left, and a new one after that. Read
+`quote_id` and `expires_at` off the response you have rather than assuming
+either behaviour.
 
 ## Polling an order
 
@@ -204,7 +211,13 @@ documented error code.
 begin
   client.orders.create(body)
 rescue SolarJuice::PartnerApi::PriceChangedError => e
-  e.details # [{ "field" => "lines[0].unit_price", "submitted" => "1110.99", "current" => "1099.00" }]
+  # details is a list of free-form objects whose keys depend on the code. For
+  # PRICE_CHANGED it is the version pair followed by one entry per moved line:
+  # [{ "price_list_version" => "plv_4c81ba09e7d2f6",
+  #    "current_price_list_version" => "plv_9f3a2c1d84b6e05" },
+  #  { "sku" => "GW-5000-DNS-30", "unit_price" => "1110.99",
+  #    "current_price" => "1099.00" }]
+  e.details
   refresh_catalogue_and_retry
 rescue SolarJuice::PartnerApi::RateLimitedError => e
   sleep(e.retry_after || 60)
@@ -240,7 +253,8 @@ status code because no response arrived.
 with exponential backoff starting at 500ms, doubling, with full jitter, capped
 at 8 seconds. A `Retry-After` header wins over the computed delay. No other 4xx
 is retried. Both `POST` endpoints are safe to retry: quotes have no side effect,
-and orders carry an idempotency key that is reused across attempts.
+and orders are deduplicated by `client_reference`, which does not change
+between attempts.
 
 Set `max_retries: 0` to handle retries yourself.
 
