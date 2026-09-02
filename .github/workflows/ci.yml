@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Ruby ${{ matrix.ruby }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The minimum supported runtime and the current one. Ruby 3.0 is not
+          # built for ubuntu-24.04, so it runs on 22.04.
+          - ruby: "3.0"
+            os: ubuntu-22.04
+          - ruby: "3.4"
+            os: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Syntax check
+        run: bundle exec rake lint
+
+      - name: Tests
+        run: bundle exec rake test
+
+  package:
+    name: Gem builds and loads
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Build
+        run: gem build solarjuice-partner-api.gemspec
+
+      # Installing the built gem proves the file list in the gemspec is complete
+      # and that the gem loads with no development dependencies present.
+      - name: Install and require
+        run: |
+          gem install ./solarjuice-partner-api-*.gem
+          ruby -e 'require "solarjuice-partner-api"; puts SolarJuice::PartnerApi::VERSION'
