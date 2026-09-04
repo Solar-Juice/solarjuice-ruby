@@ -108,6 +108,74 @@ client.inspect
 Option names match the API's parameter names, in snake case:
 `client.orders.list(status: "accepted", updated_since: last_sync, limit: 200)`.
 
+## Kits
+
+A kit is a bundle sold under one SKU, for example `Kit-14406`, that holds no
+stock of its own and is assembled from ordinary catalogue products. Every
+catalogue product carries `is_kit`; a kit also carries `components`, a list of
+`{sku, quantity}`, which is absent rather than empty on everything else.
+Branch on `is_kit` and not on the SKU prefix, which is a naming habit and not
+part of the contract.
+
+Three of a kit's figures are worked out differently, and assuming otherwise is
+what makes a partner's numbers disagree with ours:
+
+* `price` is the kit's own, set by hand against the kit. Summing the
+  components will not reproduce it.
+* `weight_kg` is the kit's own too, recorded against the kit exactly as it is
+  on any other product. A weight worked out from the components is only a
+  fallback for a kit that has none of its own, so do not rebuild it from
+  `components`: your figure would not be ours.
+* Freight is not priced from `weight_kg`, for a kit or for anything else. The
+  quote endpoint plans every consignment from the product's shipping
+  specification, its packed dimensions and the weight recorded there, and
+  never reads `weight_kg`, which is published for information only. Do not
+  pre-estimate freight from it and then reconcile against our quote; the two
+  are allowed to differ. Quote the cart and read the rate. Quote and order the
+  kit SKU, never its parts.
+* Availability is derived. Per metro it is
+  `floor(min over components of (component_available / quantity))`, and `total`
+  is the sum of those per metro figures, not a minimum taken against national
+  component totals. A kit ships from a single metro, so a battery in Perth
+  cannot complete a kit in Sydney; if your own arithmetic gives a larger
+  number, that is why.
+
+A kit is left out of the catalogue and the inventory feed altogether, rather
+than reported as zero, when a component is inactive or missing, when a
+component's quantity is not positive, when it has no components at all, or
+when its weight cannot be resolved either from itself or from its components.
+Withholding is the safer failure: we would rather not list a bundle than list
+one we cannot describe accurately.
+
+Being listed means the kit can be ordered. It does not guarantee an automatic
+freight rate: publication needs a resolvable weight, while quoting also needs
+the full packed dimensions. Every kit publishing today has them, so in
+practice what you will meet is a kit quoting `manual_quote_required`, usually
+because one unit is heavier than a standard pallet movement allows. That is a
+normal outcome rather than a fault, and retrying will not change it: a person
+prices the freight instead.
+
+Kit delivery is switched on per channel and is off by default. With it off you
+see no kits at all: a kit SKU is indistinguishable from one that does not
+exist, and nothing else about the responses changes, so `is_kit` is still on
+every product you can see and is simply always false. If you expect kits and
+cannot see any, ask your Solar Juice account manager to enable kit delivery
+rather than looking for a fault in your client.
+
+```ruby
+product = client.catalogue.get("Kit-14406")
+
+if product["is_kit"]
+  parts = product["components"].map { |c| "#{c['quantity']} x #{c['sku']}" }.join(", ")
+  puts "#{product['sku']} sells for #{product['price']} and contains #{parts}"
+end
+
+# How many you can sell is a separate call. Never infer it from the parts.
+stock = client.inventory.get("Kit-14406")
+stock["available"] # => { "Sydney" => 4, "Melbourne" => 1 }
+stock["total"]     # => 5
+```
+
 ## Pagination
 
 Every list endpoint is cursor paginated and returns the envelope

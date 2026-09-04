@@ -213,6 +213,124 @@ info:
     what `POST /v1/orders` checks: submitting an order against a version that
     is no longer current is `409 PRICE_CHANGED`.
 
+    # Kits
+
+    A kit is a bundle Solar Juice sells under one SKU, for example
+    `Kit-14406`, a battery paired with an inverter. The kit itself holds no
+    stock: it is assembled from ordinary catalogue products at the time it
+    ships. On a channel where kits are enabled they appear in the catalogue
+    and in the inventory feed alongside everything else and are ordered the
+    same way, but their price, weight and available quantity are each
+    arrived at differently, and a partner who assumes otherwise will
+    disagree with us on all three.
+
+    ## Whether you see kits at all
+
+    Kit delivery is switched on per channel, and it is off until someone
+    turns it on. A channel without it sees no kits anywhere: none in
+    `/v1/catalogue`, none in `/v1/inventory`, `404 NOT_FOUND` from
+    `GET /v1/catalogue/{sku}` for a kit SKU, and a quote or order line
+    naming a kit refused exactly as one naming a SKU that does not exist.
+    A kit is indistinguishable from a non existent product, deliberately,
+    because a channel that is not selling kits has no business being told
+    which ones it is missing.
+
+    Nothing else about the responses changes. `is_kit` is still present on
+    every product such a channel can see, and is simply always `false`, so
+    a client written against kits works unmodified either way and starts
+    seeing them the day the switch is flipped.
+
+    So if you expect kits and get nothing but `404`s, do not go looking
+    through your client: ask your Solar Juice account manager to enable kit
+    delivery on your channel. There is no API call and no key scope that
+    turns it on.
+
+    Everything below this point describes a channel with kits enabled.
+
+    Every catalogue product carries `is_kit`. It is `false` on an ordinary
+    product, so branch on that field rather than on the SKU prefix, which is
+    a naming habit and not part of this contract. A kit additionally carries
+    `components`, one entry of `{sku, quantity}` per product it is assembled
+    from. On a non kit the `components` key is absent rather than empty.
+
+    * **Price is the kit's own.** `price` on a kit is a figure set by hand
+      against the kit, not a total of its parts. Summing the components will
+      not reproduce it. Sell and order the kit's `price`.
+    * **Weight is the kit's own.** `weight_kg` on a kit is a weight recorded
+      against the kit itself, exactly as it is on any other product. Only
+      where a kit has no weight of its own is one worked out from the
+      components, and a kit for which neither is possible is withheld rather
+      than published. Do not reconstruct it from `components`: the per unit
+      weights that derivation needs are not what `weight_kg` exposes on a
+      component, so your figure would not be ours.
+    * **Freight is not quoted from `weight_kg`.** For a kit and for every
+      other product alike, `POST /v1/shipping/quotes` plans the consignment
+      from the product's shipping specification, its packed dimensions and
+      the weight recorded there, and never reads `weight_kg`. The field is
+      published for information, so do not pre-estimate freight from it: an
+      estimate built that way will disagree with our quote, and you would be
+      chasing the difference in the wrong place. Ask for a quote and read the
+      rate.
+    * **Availability is derived.** Because the kit holds no stock of its own,
+      `/v1/inventory` works its quantity out from the components, as below.
+
+    ## How many kits can you sell
+
+    Within one metro, for one kit:
+
+    ```
+    available = floor( min over components of ( component_available / quantity ) )
+    ```
+
+    A component with no inventory row in that metro contributes zero, which
+    makes the kit zero there. Absence means "cannot ship", never "unknown".
+    The division is integer and floored: three panels against a kit that
+    needs two of them is one kit, not one and a half.
+
+    The national `total` is the **sum of the per metro figures**, not a
+    minimum taken against national component totals. This is the number
+    partners most often calculate differently, so it is worth being explicit
+    about why ours is the smaller one. A minimum against national totals
+    treats a battery sitting in Perth as though it could complete a kit in
+    Sydney. It cannot: a kit ships from a single metro, so the only quantity
+    we can promise is the count of complete kits each metro can assemble on
+    its own, added up. If your own arithmetic gives a larger figure than
+    `total`, splitting the components across states is why.
+
+    ## Kits you will not see
+
+    A kit that cannot be assembled, or cannot be weighed, is absent from the
+    catalogue and from the inventory feed entirely, rather than listed at
+    zero. That covers a kit with a component that is inactive or no longer
+    exists, a kit with no components recorded at all, a kit where a
+    component's quantity is not a positive number, and a kit whose weight
+    cannot be resolved, meaning it has no weight of its own and none can be
+    worked out from its components. The last one is a safeguard against
+    publishing a bundle we cannot describe accurately. A kit vanishing from
+    your catalogue sync therefore means it is no longer sellable, exactly as
+    it would for any other withdrawn SKU.
+
+    Being listed means the kit can be ordered. It does not guarantee an
+    automatic freight rate, because publication and quoting are separate
+    tests: publication needs a resolvable weight, while quoting needs the
+    full set of packed dimensions as well. In practice every kit publishing
+    today carries complete dimensions, so the gap is empty. What you will
+    meet instead is a kit that quotes as `manual_quote_required`, most often
+    because one unit is heavier than a standard pallet movement allows. That
+    is not an error and not worth retrying: it means a person will price the
+    freight. Handle it the same way you handle it for any oversize product.
+
+    ## Ordering a kit
+
+    Order a kit as a single line carrying the kit's SKU, the kit's
+    `unit_price` and the number of kits wanted. The line is validated
+    against the kit's own derived availability, not against each component
+    separately. Do not expand a kit into one line per component: that is a
+    different order, priced at component prices and quoted as a different
+    consignment. Breaking the kit into its parts for picking happens on the
+    Solar Juice side after the order is accepted, and nothing about it is
+    visible through this API.
+
     # Webhooks
 
     There are none in stage 1. Solar Juice does not call your systems, and
@@ -353,9 +471,9 @@ security:
 
 tags:
   - name: Catalogue
-    description: Products available to this channel with the channel's own price. Kits are excluded in stage 1.
+    description: Products available to this channel with the channel's own price, kits included. A kit has `is_kit` true and carries a `components` list, and its price is its own rather than a total of its parts.
   - name: Inventory
-    description: Sellable quantity per metro, identical to what the Solar Outlet storefront sees. The API does not reserve stock.
+    description: Sellable quantity per metro, identical to what the Solar Outlet storefront sees. A kit holds no stock of its own, so its quantity is derived from its components. The API does not reserve stock.
   - name: Specials
     description: Time boxed price reductions granted to this channel. Granted specials are already reflected in catalogue prices.
   - name: Shipping
@@ -389,6 +507,29 @@ paths:
         changes, all of which change `price`. So watch
         `X-Price-List-Version`, and when it differs from the one you hold,
         re-read the whole catalogue rather than an `updated_since` slice.
+
+        Kits are included in this listing when kit delivery is enabled on your
+        channel, which is off by default and arranged by your account manager.
+        With it off, no kit appears here at all and there is no flag saying so;
+        `is_kit` is still on every product you can see and is simply always
+        `false`. If you expect kits and see none, ask your account manager
+        rather than looking for a fault in your client.
+
+        A kit is a bundle sold under one SKU that holds no stock of its own.
+        It carries `is_kit` true and a `components` list of `{sku, quantity}`,
+        its `price` is its own rather than a total of its parts, its
+        `weight_kg` is likewise its own rather than a total, and its quantity
+        in `/v1/inventory` is derived from its components. As on any other
+        product, `weight_kg` is published for information and is not what a
+        freight quote is priced from.
+        Ordinary products carry `is_kit` false and no `components` key at all,
+        so branch on `is_kit` rather than on the SKU prefix. The Kits section
+        of the introduction has the full rules.
+
+        A kit that cannot currently be assembled, because a component is
+        inactive or missing, or whose weight cannot be resolved, is left out
+        of this listing rather than returned with zero stock. Treat its
+        disappearance from a sync as a withdrawal.
 
         Supports cursor pagination, `updated_since` and the `brand` and
         `category` filters; see the introduction.
@@ -449,6 +590,7 @@ paths:
                         price: '1110.99'
                         special: null
                         weight_kg: '18.50'
+                        is_kit: false
                         images:
                           - https://cdn.shopify.com/s/files/1/0000/0000/products/gw-5000-dns-30.jpg
                         updated_at: '2026-09-02T04:10:11Z'
@@ -460,10 +602,49 @@ paths:
                         price: '119.00'
                         special: spc_01j6zk3m5x8qw2r7y9v4b1n0pd
                         weight_kg: '21.80'
+                        is_kit: false
                         images:
                           - https://cdn.shopify.com/s/files/1/0000/0000/products/jkm-440n.jpg
                         updated_at: '2026-09-01T22:30:00Z'
                     next_cursor: eyJ1cGRhdGVkX2F0IjoiMjAyNi0wOS0wMVQyMjozMDowMFoiLCJza3UiOiJKS00tNDQwTi01NEhMNC1WIn0
+                kitPage:
+                  summary: A kit, showing the two fields that distinguish it
+                  description: |
+                    `price` and `weight_kg` are both the kit's own figures,
+                    not totals of the five components. Only the quantity is
+                    derived: how many of this kit you can sell comes from
+                    `GET /v1/inventory`, worked out from the components.
+                    Freight comes from `POST /v1/shipping/quotes` and is not
+                    calculated from `weight_kg`.
+                  value:
+                    as_of: '2026-09-02T04:10:11Z'
+                    price_list_version: plv_9f3a2c1d84b6e05
+                    stale: false
+                    items:
+                      - sku: Kit-14406
+                        title: Sungrow SBR 9.6kWh Bundle with 10kW Single Phase Inverter
+                        brand: Sungrow
+                        category: Battery
+                        list_price: '5985.00'
+                        price: '5585.00'
+                        special: null
+                        weight_kg: '163.20'
+                        is_kit: true
+                        components:
+                          - sku: '14220'
+                            quantity: 3
+                          - sku: '14250'
+                            quantity: 1
+                          - sku: '14342'
+                            quantity: 1
+                          - sku: '43012'
+                            quantity: 1
+                          - sku: '43019'
+                            quantity: 1
+                        images:
+                          - https://cdn.shopify.com/s/files/1/0000/0000/products/kit-14406.jpg
+                        updated_at: '2026-09-02T01:05:00Z'
+                    next_cursor: null
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -484,9 +665,18 @@ paths:
       summary: Get one catalogue product
       description: |
         Returns one product with this channel's current price. `404 NOT_FOUND`
-        is returned for SKUs that do not exist, are not active, or are kits
-        (excluded in stage 1). The `X-Price-List-Version` header is the version
-        to submit with an order for this SKU.
+        is returned for SKUs that do not exist and for SKUs that are not
+        active. The `X-Price-List-Version` header is the version to submit
+        with an order for this SKU.
+
+        A kit is returned here like any other product, with `is_kit` true and
+        its `components` list. A kit that cannot currently be assembled is not
+        sellable and so `404`s in the same way an inactive product does.
+
+        A kit SKU also `404`s when kit delivery is not enabled on your channel,
+        with the same body as a SKU that does not exist. That is intended and
+        is not a transient failure to retry: ask your account manager to enable
+        kits.
       parameters:
         - $ref: '#/components/parameters/sku'
       responses:
@@ -519,9 +709,36 @@ paths:
                     price: '1110.99'
                     special: null
                     weight_kg: '18.50'
+                    is_kit: false
                     images:
                       - https://cdn.shopify.com/s/files/1/0000/0000/products/gw-5000-dns-30.jpg
                     updated_at: '2026-09-02T04:10:11Z'
+                kit:
+                  summary: A kit, with the components it is assembled from
+                  value:
+                    sku: Kit-14406
+                    title: Sungrow SBR 9.6kWh Bundle with 10kW Single Phase Inverter
+                    brand: Sungrow
+                    category: Battery
+                    list_price: '5985.00'
+                    price: '5585.00'
+                    special: null
+                    weight_kg: '163.20'
+                    is_kit: true
+                    components:
+                      - sku: '14220'
+                        quantity: 3
+                      - sku: '14250'
+                        quantity: 1
+                      - sku: '14342'
+                        quantity: 1
+                      - sku: '43012'
+                        quantity: 1
+                      - sku: '43019'
+                        quantity: 1
+                    images:
+                      - https://cdn.shopify.com/s/files/1/0000/0000/products/kit-14406.jpg
+                    updated_at: '2026-09-02T01:05:00Z'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -562,6 +779,38 @@ paths:
         The API does not reserve stock. An order is accepted subject to
         availability and may later move to `on_hold` or `rejected` if stock
         cannot be allocated.
+
+        ## Kits
+
+        Kits appear in this feed only when kit delivery is enabled on your
+        channel; with it off there are simply no kit rows, and a kit SKU
+        behaves like any other SKU the feed has never heard of. Your account
+        manager arranges it.
+
+        A kit holds no stock of its own, so the figures returned for a kit
+        SKU are derived from the products in its `components` list. Within
+        one metro:
+
+        ```
+        available = floor( min over components of ( component_available / quantity ) )
+        ```
+
+        A component with no inventory row in that metro contributes zero, so
+        the kit is zero there: absence means "cannot ship", not "unknown".
+        The division is integer and floored, so three panels against a kit
+        that needs two of them is one kit.
+
+        `total` for a kit is the sum of those per metro figures, not a
+        minimum taken against national component totals. The two differ
+        whenever a kit's components are spread across the country, and ours
+        is deliberately the smaller: a kit ships from one metro, so a
+        battery in Perth cannot complete a kit in Sydney. Computing it the
+        other way advertises kits that no single warehouse can assemble.
+
+        A kit that cannot be assembled at all, because a component is
+        inactive or missing, or whose weight cannot be resolved, is absent
+        from this feed as well as from the catalogue rather than reported as
+        zero.
 
         Supports cursor pagination and `updated_since`; with `updated_since`,
         SKUs whose stock has dropped to zero are returned with `total: 0` and an
@@ -636,6 +885,12 @@ paths:
         and the answer for an unknown SKU is none. There is deliberately no
         `404`, so this call cannot be used to test whether a SKU exists. Use
         `GET /v1/catalogue/{sku}`, which does `404`, for catalogue membership.
+
+        A kit SKU answers here like any other, with derived figures: per
+        metro, `floor(min over components of (component_available /
+        quantity))`, and `total` the sum of those per metro figures rather
+        than a minimum against national component totals. The Kits section
+        of the introduction explains why the national figure is a sum.
       parameters:
         - $ref: '#/components/parameters/sku'
       responses:
@@ -807,6 +1062,25 @@ paths:
         behind this endpoint is the one that prices the Solar Outlet checkout,
         so a partner quote and a storefront quote for the same cart and address
         are identical, including dangerous goods handling for batteries.
+
+        Nothing here is priced from the `weight_kg` you see on the
+        catalogue. Every consignment, kit or not, is planned from the
+        product's shipping specification, meaning its packed dimensions and
+        the weight recorded against that specification. `weight_kg` is
+        published for information and the carrier never sees it, so an
+        estimate you build from it will not match the rate you are quoted.
+        Quote the cart and read `total_price`.
+
+        Quote a kit as its own SKU. Listing its components instead describes
+        a different cart, and the quote it returns cannot be used to order
+        the kit anyway, because a quote is bound to the exact lines it was
+        issued for.
+
+        Some kits come back `manual_quote_required` rather than priced,
+        usually because a single unit is too heavy to move on a standard
+        pallet. That is a normal outcome for oversize goods rather than a
+        fault, and retrying will not change it; take the `quote_id` to your
+        account manager as the table below describes.
 
         ## Quote status
 
@@ -994,6 +1268,17 @@ paths:
            rates. Otherwise `422 VALIDATION_FAILED`.
         7. `client_reference` has not been used by this channel with a
            different body, otherwise `409 IDEMPOTENCY_CONFLICT`.
+
+        A kit is one line: the kit's SKU, the kit's `unit_price` and the
+        number of kits. If kit delivery is not enabled on your channel the
+        line fails step 4, in the same way and with the same message as a SKU
+        that does not exist. Step 4 checks the kit itself is in the catalogue and
+        step 5 checks the kit's own price, and stock is later allocated
+        against the kit's derived availability rather than against each
+        component in turn. Do not expand a kit into one line per component:
+        the components price separately, quote as a different consignment,
+        and the bundle is lost. Splitting the kit for picking happens in the
+        warehouse after acceptance.
 
         Totals are computed server side from the current price list and the
         chosen rate. The response is authoritative; do not trust client side
@@ -2243,10 +2528,33 @@ components:
 
     # Catalogue
 
+    KitComponent:
+      type: object
+      description: |
+        One product a kit is assembled from, and how many of it a single kit
+        contains.
+      required: [sku, quantity]
+      properties:
+        sku:
+          $ref: '#/components/schemas/Sku'
+          description: |
+            The component's own SKU. It is an ordinary catalogue SKU, so it
+            can be read from `/v1/catalogue/{sku}` and bought on its own, at
+            its own price.
+        quantity:
+          type: integer
+          minimum: 1
+          description: |
+            How many of this component one kit contains. It is the divisor
+            when the kit's availability is derived from the component's.
+          examples: [3]
+
     CatalogueProduct:
       type: object
-      description: A product priced for this channel.
-      required: [sku, title, brand, category, list_price, price, special, weight_kg, images, updated_at]
+      description: |
+        A product priced for this channel. It may be an ordinary product or
+        a kit; `is_kit` says which, and a kit carries `components` as well.
+      required: [sku, title, brand, category, list_price, price, special, weight_kg, is_kit, images, updated_at]
       properties:
         sku:
           $ref: '#/components/schemas/Sku'
@@ -2270,7 +2578,14 @@ components:
             Do not derive a discount badge without checking.
         price:
           $ref: '#/components/schemas/Money'
-          description: This channel's price, ex GST, after channel discount, per SKU override and any granted special. Submit as `unit_price` on orders.
+          description: |
+            This channel's price, ex GST, after channel discount, per SKU
+            override and any granted special. Submit as `unit_price` on
+            orders.
+
+            On a kit this is the kit's own price, set against the kit by
+            hand. It is not derived from the components and adding them up
+            will not reproduce it, so never substitute a computed total.
         special:
           oneOf:
             - $ref: '#/components/schemas/SpecialId'
@@ -2283,7 +2598,62 @@ components:
             Unit weight in kilograms as a decimal string, or `null` when the
             product has no weight recorded. A product with no weight still
             quotes freight, from its shipping specification.
+
+            This field is informational. Freight is not priced from it, for a
+            kit or for anything else: `POST /v1/shipping/quotes` plans every
+            consignment from the product's shipping specification and never
+            reads `weight_kg`. Do not estimate freight from it, because the
+            two figures are allowed to differ and yours would be the one that
+            is wrong.
+
+            On a kit this is the kit's own weight, recorded against the kit in
+            the same way as for any other product. A weight worked out from
+            the components is only the fallback, used when the kit itself has
+            none recorded, so do not expect the two to agree and do not
+            compute one from `components` yourself.
+
+            It is never `null` on a kit. That holds by construction rather
+            than by convention: a kit whose weight cannot be resolved either
+            way is withheld from the catalogue altogether.
           examples: ['18.50']
+        is_kit:
+          type: boolean
+          description: |
+            True when this product is a kit: a bundle sold under one SKU
+            that holds no stock of its own and is assembled from the
+            products listed in `components`.
+
+            Present on every catalogue product, and `false` on an ordinary
+            one, so branch on this field rather than on the SKU prefix. The
+            `Kit-` naming is a convention on our side and carries no
+            guarantee.
+
+            A kit differs in three ways worth knowing before you sell one:
+            `price` is the kit's own figure and not a total of its parts,
+            `weight_kg` is likewise the kit's own rather than a total, and its
+            quantity in `/v1/inventory` is derived from the components rather
+            than counted. Freight is quoted the same way as for any other
+            product, from the shipping specification rather than from
+            `weight_kg`. A kit that cannot be assembled, or whose weight
+            cannot be resolved, is absent from the catalogue rather than
+            listed at zero.
+          examples: [false]
+        components:
+          type: array
+          description: |
+            The products this kit is assembled from, one entry each. Present
+            only when `is_kit` is true, and omitted entirely rather than
+            sent empty on an ordinary product.
+
+            The list is informational, for showing a customer what is in the
+            box. It is not enough to reprice or reweigh the kit from: the
+            kit's `price` and `weight_kg` are its own and neither is derived
+            from what you see here. Order the kit as its own SKU at its own
+            `price`; sending one order line per component is a different
+            order at component prices.
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/KitComponent'
         images:
           type: array
           description: Public image URLs, primary first. May be empty.
@@ -2328,7 +2698,10 @@ components:
 
     AvailableByMetro:
       type: object
-      description: Sellable quantity keyed by metro name. Metros with zero stock are omitted.
+      description: |
+        Sellable quantity keyed by metro name. Metros with zero stock are
+        omitted. For a kit these are derived figures rather than counted
+        stock: see `InventoryItem.available`.
       additionalProperties:
         type: integer
         minimum: 0
@@ -2344,10 +2717,22 @@ components:
           $ref: '#/components/schemas/Sku'
         available:
           $ref: '#/components/schemas/AvailableByMetro'
+          description: |
+            Sellable quantity per metro. A kit holds no stock of its own, so
+            for a kit SKU each figure is derived from its components:
+            `floor(min over components of (component_available / quantity))`
+            within that metro, with a component that has no row in the metro
+            counting as zero.
         total:
           type: integer
           minimum: 0
-          description: Sum of `available` across all metros.
+          description: |
+            Sum of `available` across all metros. For a kit that is the sum
+            of the derived per metro figures, which is smaller than a minimum
+            taken against national component totals whenever the components
+            are spread across the country. The sum is the shippable number:
+            a kit is assembled in one metro, so stock in Perth cannot
+            complete a kit in Sydney.
           examples: [16]
         updated_at:
           $ref: '#/components/schemas/Timestamp'
@@ -2525,6 +2910,11 @@ components:
       properties:
         sku:
           $ref: '#/components/schemas/Sku'
+          description: |
+            The SKU being shipped. For a kit this is the kit's SKU; do not
+            list its components instead. The consignment is planned from this
+            product's shipping specification, not from the `weight_kg` shown
+            on the catalogue.
         quantity:
           type: integer
           minimum: 1
@@ -2708,10 +3098,17 @@ components:
       properties:
         sku:
           $ref: '#/components/schemas/Sku'
+          description: |
+            The SKU being ordered. For a kit this is the kit's SKU on a
+            single line, validated against the kit's derived availability
+            rather than against its components one by one.
         quantity:
           type: integer
           minimum: 1
           maximum: 9999
+          description: |
+            How many units, or for a kit how many kits, not how many of
+            anything inside it.
           examples: [12]
         unit_price:
           $ref: '#/components/schemas/Money'
