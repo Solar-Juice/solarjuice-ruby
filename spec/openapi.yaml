@@ -537,6 +537,7 @@ paths:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
         - $ref: '#/components/parameters/updated_since'
+        # state is refused here on purpose; see the description above.
         - name: brand
           in: query
           description: |
