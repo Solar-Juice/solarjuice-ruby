@@ -771,11 +771,25 @@ paths:
 
         * `locations` lists every metro the service knows about. `available`
           on each item only contains metros with a non zero quantity.
-        * `as_of` is the freshest source timestamp in the data, `as_of_oldest`
-          the stalest. The `X-Inventory-As-Of` header repeats `as_of`.
+        * `as_of` is the freshest source timestamp behind this data and
+          `as_of_oldest` the stalest. The `X-Inventory-As-Of` header repeats
+          `as_of`. Both describe rows we actually publish, not everything in
+          our warehouse system.
+
+          `as_of_oldest` is routinely months old and that is not a fault. A
+          stock row's timestamp moves when the quantity CHANGES, so a line
+          that has sat untouched in one warehouse since last year keeps last
+          year's timestamp while being perfectly accurate. Do not compare it
+          with an item's `updated_at`: that is per SKU and moves when the
+          published figure changes, so the two legitimately differ by a long
+          way. Use `as_of_oldest` to spot a warehouse that has stopped
+          reporting, not to judge the freshness of the feed as a whole.
         * `stale` is `true` when the inventory feed is older than the
-          configured threshold (default two hours). Treat stale figures as
-          indicative only; orders are still accepted subject to availability.
+          configured threshold (default two hours). It measures when the data
+          last CHANGED, not when we last synced, so it turns true overnight
+          and at weekends simply because nothing is moving in the warehouses.
+          Treat stale figures as indicative only; orders are still accepted
+          subject to availability.
 
         The API does not reserve stock. An order is accepted subject to
         availability and may later move to `on_hold` or `rejected` if stock
