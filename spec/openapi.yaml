@@ -812,6 +812,49 @@ paths:
         from this feed as well as from the catalogue rather than reported as
         zero.
 
+        ## Filtering by state
+
+        Pass `state` to have the whole listing answered for one state, which
+        is how the Solar Outlet storefront presents stock: `available` is
+        keyed by the state and carries its total, and `total` is that state's
+        stock rather than the national figure. There is nothing left to add
+        up on your side.
+
+        | `state` | Served from |
+        | --- | --- |
+        | `NSW` | Sydney |
+        | `VIC` | Melbourne |
+        | `QLD` | Brisbane **and** Townsville |
+        | `WA` | Perth |
+        | `SA` | Adelaide |
+
+        Queensland is the one to read carefully. It is served from two
+        warehouses, so `?state=QLD` returns Brisbane plus Townsville as a
+        single figure, and a SKU stocked only in Townsville is Queensland
+        stock like any other. Every other state maps to one metro.
+
+        The value is not case sensitive and the spelt out name works too, so
+        `VIC`, `vic` and `Victoria` are the same request.
+
+        There is no Solar Juice warehouse in the Northern Territory, Tasmania
+        or the Australian Capital Territory. Those are refused with `400
+        VALIDATION_FAILED` naming the states that are stocked, rather than
+        answered with an empty listing that would be indistinguishable from
+        "everything is out of stock today". Any other value is refused the
+        same way; nothing is ever silently ignored, because serving national
+        figures under a state name is the failure that ends in an oversell.
+
+        Filtering does not change how the endpoint pages. Pages stay full,
+        the cursor lands on a SKU you have not seen, and a SKU with no stock
+        in the requested state is left out of the listing entirely, the same
+        way a metro with no stock is left out of `available`. The exception
+        is `updated_since`, which still returns a SKU whose stock in that
+        state has fallen to zero, with `total: 0` and an empty `available`
+        map, so an incremental sync can clear it.
+
+        Omit `state` and the response is exactly what it has always been:
+        every metro, with the national total.
+
         Supports cursor pagination and `updated_since`; with `updated_since`,
         SKUs whose stock has dropped to zero are returned with `total: 0` and an
         empty `available` map so you can clear them.
@@ -819,6 +862,7 @@ paths:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
         - $ref: '#/components/parameters/updated_since'
+        - $ref: '#/components/parameters/state'
       responses:
         '200':
           description: A page of inventory items.
@@ -857,6 +901,20 @@ paths:
                         total: 0
                         updated_at: '2026-09-02T04:08:40Z'
                     next_cursor: null
+                queensland:
+                  summary: '?state=QLD: Brisbane and Townsville as one figure'
+                  value:
+                    as_of: '2026-09-02T04:10:11Z'
+                    as_of_oldest: '2026-09-02T03:55:00Z'
+                    stale: false
+                    locations: [QLD]
+                    items:
+                      - sku: '20571'
+                        available:
+                          QLD: 12302
+                        total: 12302
+                        updated_at: '2026-09-02T04:10:11Z'
+                    next_cursor: null
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -891,8 +949,15 @@ paths:
         quantity))`, and `total` the sum of those per metro figures rather
         than a minimum against national component totals. The Kits section
         of the introduction explains why the national figure is a sum.
+
+        `state` works here exactly as it does on the listing: `available` is
+        keyed by the state, `total` is that state's stock, and `QLD` is
+        Brisbane plus Townsville. A SKU with no stock in the requested state
+        answers `200` with `total: 0` and an empty `available` map, the same
+        as one with no stock anywhere. An unusable `state` is a `400`.
       parameters:
         - $ref: '#/components/parameters/sku'
+        - $ref: '#/components/parameters/state'
       responses:
         '200':
           description: Inventory for the SKU.
@@ -936,6 +1001,20 @@ paths:
                       Melbourne: 4
                     total: 16
                     updated_at: '2026-09-02T04:10:11Z'
+                queensland:
+                  summary: '?state=QLD, where the two metros become one figure'
+                  value:
+                    as_of: '2026-09-02T04:10:11Z'
+                    as_of_oldest: '2026-09-02T03:55:00Z'
+                    stale: false
+                    locations: [QLD]
+                    sku: '20571'
+                    available:
+                      QLD: 12302
+                    total: 12302
+                    updated_at: '2026-09-02T04:10:11Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1899,6 +1978,44 @@ components:
       required: true
       schema:
         $ref: '#/components/schemas/Sku'
+    state:
+      name: state
+      in: query
+      description: |
+        Answer for one state instead of the whole country. `available` is
+        then keyed by the state and holds its total, and `total` is that
+        state's stock, not the national figure.
+
+        `QLD` is served from two warehouses and returns Brisbane plus
+        Townsville as one figure. `NSW` is Sydney, `VIC` Melbourne, `WA`
+        Perth and `SA` Adelaide.
+
+        Case is ignored and the spelt out name is accepted, so `VIC`, `vic`
+        and `Victoria` are the same filter. `NT`, `TAS` and `ACT` have no
+        warehouse and are refused with `400 VALIDATION_FAILED`, as is any
+        value that is not a state; the parameter is never ignored. Sent blank
+        (`?state=`) or given twice it is also a `400`, so a template that
+        renders an empty variable fails loudly instead of being answered with
+        national figures under a request that named a state.
+
+        Omit it entirely for the national listing, which is unchanged.
+      required: false
+      schema:
+        type: string
+        description: |
+          A stocked state: `NSW`, `VIC`, `QLD`, `WA` or `SA`. Not the
+          `StockedState` enum, because the spelt out name and any case are
+          accepted too, so `Victoria` is a valid value the enum would
+          forbid. Anything that is not a stocked state is a 400.
+        minLength: 2
+        maxLength: 30
+      examples:
+        queensland:
+          summary: Brisbane and Townsville aggregated
+          value: QLD
+        victoria:
+          summary: Case and spelling are both forgiven
+          value: Victoria
     orderId:
       name: id
       in: path
@@ -2117,7 +2234,8 @@ components:
         validate. This is what a malformed JSON body, a body that is not a
         single JSON value, a field of the wrong JSON type, an unknown field, a
         `limit` that is not a positive integer, a `cursor` the API did not
-        issue and an unparsable `updated_since` all return.
+        issue, an unparsable `updated_since` and a `state` that is not a
+        state Solar Juice stocks all return.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/X-Request-Id'
@@ -2702,6 +2820,11 @@ components:
         Sellable quantity keyed by metro name. Metros with zero stock are
         omitted. For a kit these are derived figures rather than counted
         stock: see `InventoryItem.available`.
+
+        When the request carries `state`, the map is keyed by that state
+        instead and holds a single entry: the state's total across the metros
+        that serve it. `locations` in the same response always names the keys
+        this map can carry, filtered or not.
       additionalProperties:
         type: integer
         minimum: 0
@@ -2755,9 +2878,19 @@ components:
           description: True when the feed is older than the configured threshold (default two hours).
         locations:
           type: array
-          description: Every metro the service tracks, whether or not any item on this page has stock there.
+          description: |
+            Every metro the service tracks, whether or not any item on this
+            page has stock there. When the request carries `state` this is
+            that one state instead, because the items are then keyed by state
+            rather than by metro.
           items:
-            $ref: '#/components/schemas/Metro'
+            type: string
+            description: |
+              A metro name, or the state abbreviation when the request
+              carried `state`. Not composed with `Metro` and `StockedState`:
+              `Metro` is an unconstrained string, so a state abbreviation
+              satisfies both and `oneOf` could never validate.
+            examples: [Sydney, QLD]
         items:
           type: array
           items:
@@ -2783,8 +2916,17 @@ components:
           type: boolean
         locations:
           type: array
+          description: |
+            Every metro the service tracks, or the one requested state when
+            the request carries `state`.
           items:
-            $ref: '#/components/schemas/Metro'
+            type: string
+            description: |
+              A metro name, or the state abbreviation when the request
+              carried `state`. Not composed with `Metro` and `StockedState`:
+              `Metro` is an unconstrained string, so a state abbreviation
+              satisfies both and `oneOf` could never validate.
+            examples: [Sydney, QLD]
         sku:
           $ref: '#/components/schemas/Sku'
         available:

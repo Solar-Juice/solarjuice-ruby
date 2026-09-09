@@ -99,7 +99,7 @@ client.inspect
 | Group | Methods |
 |---|---|
 | `client.catalogue` | `list`, `auto_page`, `get(sku)` |
-| `client.inventory` | `list`, `auto_page`, `get(sku)` |
+| `client.inventory` | `list`, `auto_page`, `get(sku, state:)` |
 | `client.specials` | `list`, `auto_page` |
 | `client.shipping` | `quote(body)` |
 | `client.orders` | `create(body, idempotency_key:)`, `list`, `auto_page`, `get(id, if_none_match:)`, `cancel(id, note:)` |
@@ -220,6 +220,31 @@ client.catalogue.auto_page(updated_since: watermark).each { |product| upsert(pro
 
 Inventory rows that have dropped to zero are still returned by an
 `updated_since` query, with `total: 0`, so you can clear them locally.
+
+### Stock in one state
+
+Pass `state:` and the whole answer is scoped to it: `available` is keyed by the
+state and `total` is that state's stock rather than the national figure, so
+there is nothing left for you to add up.
+
+```ruby
+client.inventory.auto_page(state: "VIC").each do |item|
+  set_victorian_stock(item["sku"], item["total"]) # Melbourne's figure
+end
+
+# Queensland is served from Brisbane AND Townsville and comes back as their
+# sum, so a SKU stocked only in Townsville is Queensland stock.
+qld = client.inventory.get("20571", state: "QLD")
+qld["available"] # => { "QLD" => 12302 }  (9494 Brisbane + 2808 Townsville)
+qld["total"]     # => 12302, not the national 43318
+```
+
+`NSW`, `VIC`, `QLD`, `WA` and `SA` are the states Solar Juice stocks. Case is
+ignored and the spelt out name works, so `VIC`, `vic` and `Victoria` are the
+same filter. There is no warehouse in `NT`, `TAS` or `ACT`, so those raise a
+`400` rather than returning an empty list that would read as "out of stock
+everywhere". Omit `state:` and you get every metro and the national total,
+exactly as before.
 
 ## Placing an order
 
