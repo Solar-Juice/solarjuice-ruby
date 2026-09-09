@@ -244,7 +244,10 @@ ignored and the spelt out name works, so `VIC`, `vic` and `Victoria` are the
 same filter. There is no warehouse in `NT`, `TAS` or `ACT`, so those raise a
 `400` rather than returning an empty list that would read as "out of stock
 everywhere". Omit `state:` and you get every metro and the national total,
-exactly as before.
+exactly as before. Pass `nil` to leave it out, never `""`: an empty string is
+sent as `?state=` and is a `400`, deliberately, because a blank state answered
+with national figures is how a partner ends up selling stock that is in
+another state.
 
 ## Placing an order
 

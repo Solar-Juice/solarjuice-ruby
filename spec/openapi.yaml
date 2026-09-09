@@ -2003,9 +2003,9 @@ components:
       schema:
         type: string
         description: |
-          A stocked state: `NSW`, `VIC`, `QLD`, `WA` or `SA`. Not the
-          `StockedState` enum, because the spelt out name and any case are
-          accepted too, so `Victoria` is a valid value the enum would
+          A stocked state: `NSW`, `VIC`, `QLD`, `WA` or `SA`. Deliberately
+          not an enum of those five, because the spelt out name and any case
+          are accepted too, so `Victoria` is a valid value an enum would
           forbid. Anything that is not a stocked state is a 400.
         minLength: 2
         maxLength: 30
@@ -2887,9 +2887,10 @@ components:
             type: string
             description: |
               A metro name, or the state abbreviation when the request
-              carried `state`. Not composed with `Metro` and `StockedState`:
-              `Metro` is an unconstrained string, so a state abbreviation
-              satisfies both and `oneOf` could never validate.
+              carried `state`. Left as a plain string rather than a union of
+              the two: `Metro` is an unconstrained string, so a state
+              abbreviation satisfies it as well and no composition could
+              tell them apart.
             examples: [Sydney, QLD]
         items:
           type: array
@@ -2923,9 +2924,10 @@ components:
             type: string
             description: |
               A metro name, or the state abbreviation when the request
-              carried `state`. Not composed with `Metro` and `StockedState`:
-              `Metro` is an unconstrained string, so a state abbreviation
-              satisfies both and `oneOf` could never validate.
+              carried `state`. Left as a plain string rather than a union of
+              the two: `Metro` is an unconstrained string, so a state
+              abbreviation satisfies it as well and no composition could
+              tell them apart.
             examples: [Sydney, QLD]
         sku:
           $ref: '#/components/schemas/Sku'
