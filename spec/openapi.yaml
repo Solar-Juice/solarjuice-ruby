@@ -2774,11 +2774,23 @@ components:
             $ref: '#/components/schemas/KitComponent'
         images:
           type: array
-          description: Public image URLs, primary first. May be empty.
+          description: |
+            Public image URLs, primary first. Empty when we hold no picture for
+            the product, which is not an error and not a placeholder: an empty
+            array means there is nothing to show, and a placeholder would be
+            rendered as though it were the product.
+
+            These are Solar Juice URLs that redirect to the image, not the
+            underlying CDN link. Use them as given and do not store the address
+            they redirect to: the redirect target is replaced whenever the
+            image is updated, and the URL published here is the one that keeps
+            working. They need no authentication, so they can be used directly
+            in an `<img src>`, and they are not cached, so expect a redirect on
+            every load.
           items:
             type: string
             format: uri
-            examples: [https://cdn.shopify.com/s/files/1/0000/0000/products/gw-5000-dns-30.jpg]
+            examples: [https://pim.solarjuice.com.au/img/product/12122]
         updated_at:
           $ref: '#/components/schemas/Timestamp'
           description: When this product, or its price for this channel, last changed.
