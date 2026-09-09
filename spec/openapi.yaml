@@ -2785,8 +2785,18 @@ components:
             they redirect to: the redirect target is replaced whenever the
             image is updated, and the URL published here is the one that keeps
             working. They need no authentication, so they can be used directly
-            in an `<img src>`, and they are not cached, so expect a redirect on
-            every load.
+            in an `<img src>`.
+
+            Add `?width=` (or `?height=`) to have the image resized before it
+            reaches the browser, up to 5000: `.../img/product/12122?width=600`.
+            A page of thumbnails should do this rather than pulling full size
+            assets.
+
+            The redirect is not cached, so a browser re-requests on every page
+            load, and there is a limit of 1200 image loads per minute per
+            viewer. That is several times a full catalogue in one page, but a
+            page showing hundreds of products at once should lazy-load them
+            rather than requesting every image up front.
           items:
             type: string
             format: uri
