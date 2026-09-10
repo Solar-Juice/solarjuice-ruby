@@ -334,9 +334,27 @@ info:
     # Webhooks
 
     You can register an endpoint and be told when something changes, instead
-    of polling on a timer. Ask your Solar Juice contact to register the URL;
-    it is set up on our side rather than self-service, because we will be
-    making requests to whatever address is entered.
+    of polling on a timer.
+
+    ## Getting registered
+
+    There is no self-service registration, because we will be making requests
+    to whatever address is entered, so we set it up on our side. Send your
+    Solar Juice contact:
+
+    * **The URL.** It must be `https`, with no credentials embedded in it and
+      no `#fragment`. It should return a 2xx quickly and do the real work
+      afterwards.
+    * **Which events you want**, `catalogue.updated`, `specials.updated`, or
+      both.
+
+    You will be given a **signing secret** in return. It is shown once, at
+    registration, and there is no way to retrieve it afterwards: if it is
+    lost, the endpoint has to be deleted and registered again, and you will
+    have to deploy the new secret. Store it the way you store your API key.
+
+    Tell us if your endpoint moves. Changing the URL means registering a new
+    endpoint, which issues a new secret.
 
     Two events are available:
 
