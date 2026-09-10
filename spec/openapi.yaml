@@ -531,6 +531,7 @@ info:
     | `VALIDATION_FAILED` | 422 | Request body or query does not validate; `details` lists each problem |
     | `RATE_LIMITED` | 429 | Per key allowance exhausted; honour `Retry-After` |
     | `PRICE_CHANGED` | 409 | Order line prices or `price_list_version` no longer match; `details` carries current values |
+    | `INSUFFICIENT_STOCK` | 409 | A line asks for more than is currently sellable. `details` carries `sku`, `requested` and `available`. Worth retrying after your next inventory read; the request itself is fine. |
     | `IDEMPOTENCY_CONFLICT` | 409 | Same `client_reference` submitted with a different body |
     | `QUOTE_UNAVAILABLE` | 503 | Freight engine temporarily unreachable; honour `Retry-After` |
     | `STALE_DATA` | 503 | The catalogue or inventory read model is not loaded on the instance that answered; honour `Retry-After` and retry |
@@ -881,12 +882,26 @@ paths:
           configured threshold (default two hours). It measures when the data
           last CHANGED, not when we last synced, so it turns true overnight
           and at weekends simply because nothing is moving in the warehouses.
-          Treat stale figures as indicative only; orders are still accepted
-          subject to availability.
+          Treat stale figures as indicative only. Orders are validated against
+          this same feed, so a stale figure can refuse an order that would
+          otherwise be fine, and vice versa.
 
-        The API does not reserve stock. An order is accepted subject to
-        availability and may later move to `on_hold` or `rejected` if stock
-        cannot be allocated.
+        **Check stock immediately before you sell.** `GET /v1/inventory/{sku}`
+        is one cheap request and is the figure orders are validated against.
+        Published stock is refreshed every few minutes, so a value you read
+        much earlier than the sale can be wrong.
+
+        `POST /v1/orders` refuses any line asking for more than is currently
+        available, with `409 INSUFFICIENT_STOCK` naming the sku, what you
+        asked for and what is available. That is worth retrying rather than
+        fixing: the request was well formed and the answer can differ a
+        minute later.
+
+        The API still does not RESERVE stock. Nothing is held between your
+        check and your order, or between your order and allocation, so an
+        accepted order can still move to `on_hold` or `rejected` if stock is
+        gone by the time it is allocated. The check refuses what we already
+        know we cannot fill; it cannot promise the future.
 
         ## Kits
 
@@ -2438,7 +2453,8 @@ components:
                   request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
     OrderConflict:
       description: |
-        Either the prices submitted no longer match the channel's current price
+        One of three: a line exceeds available stock (`INSUFFICIENT_STOCK`),
+        or the prices submitted no longer match the channel's current price
         list (`PRICE_CHANGED`, refresh the catalogue and resubmit with the
         current `unit_price` values and `price_list_version` from `details`) or
         this `client_reference` was already used with a different body
@@ -2683,6 +2699,7 @@ components:
         - VALIDATION_FAILED
         - RATE_LIMITED
         - PRICE_CHANGED
+        - INSUFFICIENT_STOCK
         - IDEMPOTENCY_CONFLICT
         - QUOTE_UNAVAILABLE
         - STALE_DATA
