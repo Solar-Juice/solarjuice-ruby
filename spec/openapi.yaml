@@ -352,13 +352,19 @@ info:
     leaks. A delivery looks like this:
 
     ```json
-    {
-      "event": "catalogue.updated",
-      "occurred_at": "2026-09-10T02:14:07Z",
-      "channel_id": "ch_01m1jm7gqxzs6ygf2w3bnzjfde",
-      "hint": { "as_of": "2026-09-10T02:14:02Z" }
-    }
+    {"channel_id": "ch_01m1jm7gqxzs6ygf2w3bnzjfde", "event": "catalogue.updated", "occurred_at": "2026-10-10T02:14:07Z", "hint": {"as_of": "2026-10-10T02:14:02Z"}}
     ```
+
+    That is the literal body, formatting included. Keys come back in a fixed
+    order that is **not** the order above when read as a list, and there are
+    spaces after the colons and commas. `hint` is present only on
+    `catalogue.updated`; a `specials.updated` body has three keys.
+
+    None of that matters if you verify the signature against the **raw bytes
+    you received**, which is what you should do. It matters a great deal if
+    you parse the JSON and re-serialize it to check the HMAC: your
+    re-serialization will not match ours and every signature will appear
+    invalid.
 
     On `catalogue.updated`, fetch `GET /v1/catalogue?updated_since=` with the
     time of your last successful sync. On `specials.updated`, fetch
@@ -378,6 +384,7 @@ info:
 
     `v1` is `HMAC-SHA256(secret, "<t>.<raw body>")`, hex encoded, where the
     secret is the one shown to you once when the endpoint was registered.
+    **Raw body** means the exact bytes on the wire, before any parsing.
     Compare it with a constant-time comparison, and reject anything whose `t`
     is far from your own clock: the timestamp is inside the signed material
     precisely so a captured delivery cannot be replayed at you forever.
