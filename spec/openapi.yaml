@@ -333,10 +333,78 @@ info:
 
     # Webhooks
 
-    There are none in stage 1. Solar Juice does not call your systems, and
-    there is nothing to register or verify. Polling is the intended pattern:
-    `GET /v1/orders?updated_since=` for order status, `X-Price-List-Version`
-    for prices, and `GET /v1/inventory?updated_since=` for stock.
+    You can register an endpoint and be told when something changes, instead
+    of polling on a timer. Ask your Solar Juice contact to register the URL;
+    it is set up on our side rather than self-service, because we will be
+    making requests to whatever address is entered.
+
+    Two events are available:
+
+    | Event | Fires when |
+    | --- | --- |
+    | `catalogue.updated` | The published catalogue changes, which includes your prices |
+    | `specials.updated` | A special granted to you is created, changed, approved or ended |
+
+    **The ping carries no product data.** It tells you what changed and when,
+    and you then call the API you already use. That keeps one source of truth,
+    avoids acting on a payload that is already out of date by the time it
+    arrives, and means the request discloses nothing if your endpoint URL
+    leaks. A delivery looks like this:
+
+    ```json
+    {
+      "event": "catalogue.updated",
+      "occurred_at": "2026-09-10T02:14:07Z",
+      "channel_id": "ch_01m1jm7gqxzs6ygf2w3bnzjfde",
+      "hint": { "as_of": "2026-09-10T02:14:02Z" }
+    }
+    ```
+
+    On `catalogue.updated`, fetch `GET /v1/catalogue?updated_since=` with the
+    time of your last successful sync. On `specials.updated`, fetch
+    `GET /v1/specials`. Inventory has no event: stock changes constantly and a
+    ping per change would be worse than the poll it replaces, so keep using
+    `GET /v1/inventory?updated_since=` for that.
+
+    ## Verifying a delivery
+
+    Every request carries three headers:
+
+    | Header | Meaning |
+    | --- | --- |
+    | `X-SolarJuice-Event` | The event name, matching the body |
+    | `X-SolarJuice-Delivery` | The queued delivery's id. Stable across retries of the same ping, and **reused when pings coalesce**, so do not use it to deduplicate: two genuinely different changes can share it |
+    | `X-SolarJuice-Signature` | `t=<unix seconds>,v1=<hex>` |
+
+    `v1` is `HMAC-SHA256(secret, "<t>.<raw body>")`, hex encoded, where the
+    secret is the one shown to you once when the endpoint was registered.
+    Compare it with a constant-time comparison, and reject anything whose `t`
+    is far from your own clock: the timestamp is inside the signed material
+    precisely so a captured delivery cannot be replayed at you forever.
+
+    ## What to expect
+
+    * **Reply quickly with any 2xx.** Anything else is a failure and we retry.
+      Do the actual fetch after you have responded; a slow endpoint just gets
+      retried.
+    * **Deliveries are coalesced.** If your listener is down and the catalogue
+      changes five times, you get one `catalogue.updated` when it comes back,
+      not five. The ping says "something changed", so one is enough.
+    * **Retries back off** from 30 seconds to a 30 minute cap, over 8
+      attempts spanning about an hour, then that delivery is given up on. An
+      endpoint that keeps failing is eventually disabled and we will contact
+      you; we can re-enable it without reissuing your secret.
+    * **Expect duplicates.** A delivery we could not confirm is retried, so
+      treat the same event arriving twice as normal and make your handler
+      idempotent. Since the ping carries no data, the safe handler is simply
+      "fetch current state", which is naturally idempotent.
+    * **Order is not guaranteed.** Always fetch current state rather than
+      assuming the ping order reflects the change order.
+    * **We only call https**, we never follow redirects, and we will not
+      connect to a private or link-local address.
+
+    Polling still works and is still supported. `X-Price-List-Version` on
+    catalogue responses remains the cheapest way to tell whether prices moved.
 
     # Idempotency
 
