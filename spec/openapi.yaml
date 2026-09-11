@@ -131,7 +131,8 @@ info:
 
     Keys carry scopes. A request to an operation outside the key's scopes returns
     `403 FORBIDDEN`. Stage 1 scopes are `catalogue:read`, `inventory:read`,
-    `specials:read`, `shipping:quote`, `orders:read` and `orders:write`.
+    `specials:read`, `shipping:quote`, `orders:read`, `orders:write` and
+    `webhooks:write`.
 
     # Rate limits
 
@@ -574,6 +575,12 @@ tags:
     description: Freight quotes produced by the same engine as the Solar Outlet checkout. A quote is required to place an order.
   - name: Orders
     description: Orders placed against this channel's trade account. Validation and acceptance are synchronous; poll the order for fulfilment status.
+  - name: Webhooks
+    description: |
+      Be told when the catalogue or your specials change, instead of polling.
+      Register an HTTPS endpoint with your own key; each delivery is a small
+      signed notification telling you which event fired, and you re-fetch the
+      affected resource. The signing secret is returned once, at registration.
   - name: Health
     description: Unauthenticated liveness check.
 
@@ -2019,6 +2026,185 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /v1/webhooks:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhooks
+      summary: List this channel's webhook endpoints
+      description: |
+        Returns every webhook endpoint registered by this channel, including
+        disabled ones, with delivery health (`last_status`, `last_error`,
+        `consecutive_failures`). You only ever see your own: the channel is
+        taken from the key, never from the request.
+      responses:
+        '200':
+          description: This channel's endpoints.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endpoints]
+                properties:
+                  endpoints:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebhookEndpoint'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+    post:
+      tags: [Webhooks]
+      operationId: createWebhook
+      summary: Register a webhook endpoint
+      description: |
+        Registers an HTTPS URL to receive event notifications for this channel.
+        Requires the `webhooks:write` scope.
+
+        **The `secret` in the 201 is shown exactly once.** Store it in a secrets
+        manager. Nothing will return it again; to rotate, delete the endpoint
+        and register a fresh one.
+
+        `url` must be `https`, must not carry credentials or a fragment, and
+        must resolve to a publicly reachable address. Private, loopback and
+        link-local targets are rejected at registration and again at delivery.
+
+        # What a delivery looks like
+
+        Each event is a `POST` to your URL with `Content-Type: application/json`
+        and `User-Agent: SolarJuice-Webhooks/1`, carrying:
+
+        | Header | Meaning |
+        |---|---|
+        | `X-SolarJuice-Event` | `catalogue.updated` or `specials.updated` |
+        | `X-SolarJuice-Delivery` | Unique id for this delivery; use it to de-duplicate retries |
+        | `X-SolarJuice-Signature` | `t=<unix seconds>,v1=<hex HMAC-SHA256>` |
+
+        The body is a **notification, not the data**:
+
+        ```json
+        {"event":"catalogue.updated","occurred_at":"2026-09-11T05:12:40Z","channel_id":"ch_...","hint":{}}
+        ```
+
+        On receipt, re-fetch the affected resource (`GET /v1/catalogue` or
+        `GET /v1/specials`, ideally with `updated_since`). Never trust the
+        notification alone.
+
+        # Verifying the signature
+
+        Compute `HMAC-SHA256(secret, "<t>.<raw request body>")` over the raw
+        bytes exactly as received, before any JSON parsing, and compare the hex
+        digest to `v1` with a constant-time comparison. Reject deliveries whose
+        `t` is more than a few minutes from your clock, which defeats replay.
+
+        ```python
+        import hmac, hashlib
+        sig = dict(kv.split("=", 1) for kv in header.split(","))
+        expected = hmac.new(secret.encode(), f"{sig['t']}.".encode() + raw_body,
+                            hashlib.sha256).hexdigest()
+        ok = hmac.compare_digest(expected, sig["v1"])
+        ```
+
+        # Retries and disabling
+
+        Respond `2xx` quickly; do the work afterwards. A non-2xx or a timeout is
+        retried up to 8 times over roughly an hour with exponential backoff.
+        After 200 consecutive failed attempts the endpoint is switched to
+        `disabled` with a `disabled_reason`, and stops receiving events. Check
+        `GET /v1/webhooks` for delivery health; a disabled endpoint is fixed by
+        deleting it and registering again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreateRequest'
+            examples:
+              both:
+                value:
+                  url: https://example.partner.com.au/hooks/solarjuice
+                  events: [catalogue.updated, specials.updated]
+                  description: Production catalogue sync
+      responses:
+        '201':
+          description: The endpoint, plus the signing secret (shown only here).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/WebhookEndpoint'
+                  - type: object
+                    required: [secret]
+                    properties:
+                      secret:
+                        type: string
+                        description: The HMAC signing secret. Returned once, never again.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/webhooks/{webhook_id}:
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhook
+      summary: Remove a webhook endpoint
+      description: |
+        Deletes one of this channel's endpoints and invalidates its secret.
+        An id that belongs to another channel, or does not exist, returns
+        `404` in both cases.
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: wh_01m24fj0js2r8nkr2pwhc6wykm
+      responses:
+        '204':
+          description: Deleted.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
   /v1/health:
     get:
       tags: [Health]
@@ -2578,6 +2764,70 @@ components:
                   request_id: req_01j6zk3m5x8qw2r7y9v4b1n0pd
 
   schemas:
+    # Webhooks
+
+    WebhookCreateRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS endpoint to POST deliveries to. No credentials, no fragment, publicly reachable.
+          example: https://example.partner.com.au/hooks/solarjuice
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [catalogue.updated, specials.updated]
+        description:
+          type: [string, 'null']
+          maxLength: 200
+
+    WebhookEndpoint:
+      type: object
+      required: [id, channel_id, url, events, status, created_at, updated_at, consecutive_failures]
+      properties:
+        id:
+          type: string
+          example: wh_01m24fj0js2r8nkr2pwhc6wykm
+        channel_id:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+            enum: [catalogue.updated, specials.updated]
+        status:
+          type: string
+          enum: [active, disabled]
+        description:
+          type: [string, 'null']
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+        disabled_at:
+          $ref: '#/components/schemas/Timestamp'
+        disabled_reason:
+          type: [string, 'null']
+        last_success_at:
+          $ref: '#/components/schemas/Timestamp'
+        last_attempt_at:
+          $ref: '#/components/schemas/Timestamp'
+        last_status:
+          type: [integer, 'null']
+          description: HTTP status of the most recent delivery attempt.
+        last_error:
+          type: [string, 'null']
+        consecutive_failures:
+          type: integer
+          description: Failed attempts in a row. The endpoint is disabled at 200.
+
     # Primitives
 
     Money:
