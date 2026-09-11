@@ -581,6 +581,11 @@ tags:
       Register an HTTPS endpoint with your own key; each delivery is a small
       signed notification telling you which event fired, and you re-fetch the
       affected resource. The signing secret is returned once, at registration.
+
+      ![How Solar Juice API webhooks work](/static/webhooks-flow.svg)
+
+      Everything is done with your own API key. Solar Juice never needs to send
+      you a secret out of band.
   - name: Health
     description: Unauthenticated liveness check.
 
@@ -634,6 +639,10 @@ paths:
 
         Supports cursor pagination, `updated_since` and the `brand` and
         `category` filters; see the introduction.
+        ```bash
+        curl -sS "https://api.solarjuice.com.au/v1/catalogue?limit=50" \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -779,6 +788,10 @@ paths:
         with the same body as a SKU that does not exist. That is intended and
         is not a transient failure to retry: ask your account manager to enable
         kits.
+        ```bash
+        curl -sS https://api.solarjuice.com.au/v1/catalogue/JKM-440N-54HL4-V \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/sku'
       responses:
@@ -988,6 +1001,10 @@ paths:
         Supports cursor pagination and `updated_since`; with `updated_since`,
         SKUs whose stock has dropped to zero are returned with `total: 0` and an
         empty `available` map so you can clear them.
+        ```bash
+        curl -sS "https://api.solarjuice.com.au/v1/inventory?state=NSW&limit=50" \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -1085,6 +1102,10 @@ paths:
         Brisbane plus Townsville. A SKU with no stock in the requested state
         answers `200` with `total: 0` and an empty `available` map, the same
         as one with no stock anywhere. An unusable `state` is a `400`.
+        ```bash
+        curl -sS "https://api.solarjuice.com.au/v1/inventory/JKM-440N-54HL4-V?state=NSW" \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/sku'
         - $ref: '#/components/parameters/state'
@@ -1187,6 +1208,10 @@ paths:
         product.
 
         Supports cursor pagination and `updated_since`; see the introduction.
+        ```bash
+        curl -sS "https://api.solarjuice.com.au/v1/specials?active=true" \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -1333,6 +1358,13 @@ paths:
         are therefore free, but the clock does not restart: always read
         `expires_at` off the response you have rather than assuming 30 minutes
         from now.
+        ```bash
+        curl -sS -X POST https://api.solarjuice.com.au/v1/shipping/quotes \
+          -H "Authorization: Bearer sj_live_<your key>" \
+          -H "Content-Type: application/json" \
+          -d '{"destination": {"suburb": "Parramatta", "postcode": "2150", "state": "NSW"},
+               "lines": [{"sku": "JKM-440N-54HL4-V", "quantity": 12}]}'
+        ```
       requestBody:
         required: true
         content:
@@ -1511,6 +1543,26 @@ paths:
         or `rejected`. Poll `GET /v1/orders/{id}` (using `If-None-Match`) or
         `GET /v1/orders?updated_since=` to track it. The full state machine is
         documented on the `Order` schema.
+        ```bash
+        curl -sS -X POST https://api.solarjuice.com.au/v1/orders \
+          -H "Authorization: Bearer sj_live_<your key>" \
+          -H "Idempotency-Key: 8f14e45f-ea2b-4c1d-9f7a-2b6c0d1e5a90" \
+          -H "Content-Type: application/json" \
+          -d '{"client_reference": "PO-88213",
+               "price_list_version": "plv_9f3a2c1d84b6e05",
+               "quote_id": "qt_01j6zk3m5x8qw2r7y9v4b1n0pd",
+               "rate_service_code": "ALLIED-GENERAL",
+               "delivery": {"name": "Jane Citizen", "phone": "+61400000000",
+                            "address1": "12 Example Street", "suburb": "Parramatta",
+                            "postcode": "2150", "state": "NSW"},
+               "lines": [{"sku": "JKM-440N-54HL4-V", "quantity": 12, "unit_price": "119.00"}]}'
+        ```
+
+        All six of `client_reference`, `price_list_version`, `quote_id`,
+        `rate_service_code`, `delivery` and `lines` are required, and each line
+        carries the `unit_price` you were quoted. Re-sending the same
+        `Idempotency-Key` returns the original order rather than creating a
+        second one.
       parameters:
         - $ref: '#/components/parameters/idempotencyKey'
       requestBody:
@@ -1691,6 +1743,10 @@ paths:
 
         A key only ever lists its own side of the sandbox boundary: a
         `sj_test_` key sees sandbox orders, a `sj_live_` key sees live ones.
+        ```bash
+        curl -sS "https://api.solarjuice.com.au/v1/orders?limit=20" \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/cursor'
@@ -1810,6 +1866,10 @@ paths:
         counts against the rate limit, so poll at a sensible interval (30 seconds
         or more) or use `GET /v1/orders?updated_since=` to poll all orders in one
         request.
+        ```bash
+        curl -sS https://api.solarjuice.com.au/v1/orders/ord_01m24fj0js2r8nkr2pwhc6wykm \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
       parameters:
         - $ref: '#/components/parameters/orderId'
         - $ref: '#/components/parameters/ifNoneMatch'
@@ -1940,6 +2000,12 @@ paths:
         appended to `events`. It is safe to call twice only in the sense that
         the second call is refused with `422`, not that it does anything: check
         `status` on the order you already hold before calling.
+        ```bash
+        curl -sS -X POST https://api.solarjuice.com.au/v1/orders/ord_01m24fj0js2r8nkr2pwhc6wykm/cancel \
+          -H "Authorization: Bearer sj_live_<your key>" \
+          -H "Content-Type: application/json" \
+          -d '{"note": "Customer changed the panel selection"}'
+        ```
       parameters:
         - $ref: '#/components/parameters/orderId'
       requestBody:
@@ -2248,6 +2314,11 @@ paths:
         other operation it carries no `RateLimit-*` headers and never answers
         `429`. It is a liveness probe, not a service: do not poll it in place
         of the endpoint you actually want.
+        ```bash
+        curl -sS https://api.solarjuice.com.au/v1/health
+        ```
+
+        Unauthenticated: no key required.
       security: []
       responses:
         '200':
