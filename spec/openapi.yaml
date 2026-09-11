@@ -131,8 +131,9 @@ info:
 
     Keys carry scopes. A request to an operation outside the key's scopes returns
     `403 FORBIDDEN`. Stage 1 scopes are `catalogue:read`, `inventory:read`,
-    `specials:read`, `shipping:quote`, `orders:read`, `orders:write` and
-    `webhooks:write`.
+    `specials:read`, `shipping:quote`, `orders:read` and `orders:write`.
+    Managing your own webhook endpoints needs no particular scope: any key for
+    your channel can do it.
 
     # Rate limits
 
@@ -2143,7 +2144,7 @@ paths:
       summary: Register a webhook endpoint
       description: |
         Registers an HTTPS URL to receive event notifications for this channel.
-        Requires the `webhooks:write` scope.
+        Any key for your channel can do this; no particular scope is needed.
 
         # Register
 
