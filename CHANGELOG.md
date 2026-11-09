@@ -4,6 +4,16 @@ All notable changes to this gem are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the gem follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `webhooks` resource group: `list`, `create(body)`, `delete(id)`,
+  `enable(id)` and `test(id)`, covering the partner self-service webhook
+  endpoints in the API.
+- `InsufficientStockError` for the API's `INSUFFICIENT_STOCK` code, raised
+  when an order line asks for more than is currently sellable.
+
 ## 1.0.0 - 2026-09-02
 
 Initial release, matching version 1.0.0 of the Solar Juice Partner API.

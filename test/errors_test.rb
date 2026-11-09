@@ -14,6 +14,7 @@ module SolarJuice
         ["VALIDATION_FAILED", 422] => ValidationFailedError,
         ["RATE_LIMITED", 429] => RateLimitedError,
         ["PRICE_CHANGED", 409] => PriceChangedError,
+        ["INSUFFICIENT_STOCK", 409] => InsufficientStockError,
         ["IDEMPOTENCY_CONFLICT", 409] => IdempotencyConflictError,
         ["QUOTE_UNAVAILABLE", 503] => QuoteUnavailableError,
         ["STALE_DATA", 503] => StaleDataError,

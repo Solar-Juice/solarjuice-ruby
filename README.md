@@ -103,6 +103,7 @@ client.inspect
 | `client.specials` | `list`, `auto_page` |
 | `client.shipping` | `quote(body)` |
 | `client.orders` | `create(body, idempotency_key:)`, `list`, `auto_page`, `get(id, if_none_match:)`, `cancel(id, note:)` |
+| `client.webhooks` | `list`, `create(body)`, `delete(id)`, `enable(id)`, `test(id)` |
 | `client` | `health` |
 
 Option names match the API's parameter names, in snake case:
@@ -287,6 +288,33 @@ order["status"] # cancelled
 
 The note is optional. Without one the API records `cancelled by partner`.
 
+## Webhooks
+
+Instead of polling the catalogue and specials, register an HTTPS endpoint and
+the API tells you when either changes. Any key for your channel can manage its
+webhooks, and you only ever see your own.
+
+```ruby
+endpoint = client.webhooks.create(
+  url: "https://your-host.example/hooks/solarjuice",
+  events: ["catalogue.updated", "specials.updated"]
+)
+endpoint["secret"] # shown once: store it now, nothing returns it again
+
+client.webhooks.test(endpoint["id"]) # queues a signed webhook.test delivery
+client.webhooks.list["endpoints"]    # every endpoint, with delivery health
+```
+
+A delivery is a notification, not the data: on receipt, re-fetch with
+`updated_since`. Verify `X-SolarJuice-Signature` before trusting it; the
+reference at https://dev.solarjuice.com.au/docs shows how.
+
+After 200 failed deliveries in a row an endpoint is switched to `disabled`.
+Once your receiver is healthy, `client.webhooks.enable(id)` switches it back on
+with the same id and the same secret, so there is nothing to redeploy. `test`
+on a disabled endpoint raises `ValidationFailedError`. To rotate the secret,
+`delete(id)` and create the endpoint again.
+
 ## Idempotency
 
 `client_reference` in the body is the only idempotency key. Resubmitting the
@@ -362,6 +390,7 @@ end
 | `ValidationFailedError` | `VALIDATION_FAILED` | 422 |
 | `RateLimitedError` | `RATE_LIMITED` | 429 |
 | `PriceChangedError` | `PRICE_CHANGED` | 409 |
+| `InsufficientStockError` | `INSUFFICIENT_STOCK` | 409 |
 | `IdempotencyConflictError` | `IDEMPOTENCY_CONFLICT` | 409 |
 | `QuoteUnavailableError` | `QUOTE_UNAVAILABLE` | 503 |
 | `StaleDataError` | `STALE_DATA` | 503 |
@@ -375,7 +404,7 @@ response carries no error envelope at all, which is what an edge proxy's own
 HTML page looks like, `code` is filled in from the status (401 `UNAUTHORIZED`,
 403 `FORBIDDEN`, 404 `NOT_FOUND`, 422 `VALIDATION_FAILED`, 429 `RATE_LIMITED`,
 500 `INTERNAL`) so `e.code == "RATE_LIMITED"` still holds. 409 and 503 each
-cover two codes, so those keep a nil `code` and raise `ApiError`.
+cover more than one code, so those keep a nil `code` and raise `ApiError`.
 
 `retry_after` on `RateLimitedError` is a whole number of seconds, rounded up,
 whether the header arrived as seconds or as an HTTP date.

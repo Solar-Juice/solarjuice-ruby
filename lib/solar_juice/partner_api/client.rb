@@ -14,6 +14,7 @@ require_relative "resources/inventory"
 require_relative "resources/orders"
 require_relative "resources/shipping"
 require_relative "resources/specials"
+require_relative "resources/webhooks"
 
 module SolarJuice
   module PartnerApi
@@ -49,7 +50,7 @@ module SolarJuice
       attr_reader :base_url, :timeout, :max_retries, :user_agent
 
       # Resource groups.
-      attr_reader :catalogue, :inventory, :specials, :shipping, :orders
+      attr_reader :catalogue, :inventory, :specials, :shipping, :orders, :webhooks
 
       # Rate limit state from the most recent response, or nil before the first
       # call. Values come from the RateLimit-Limit, RateLimit-Remaining and
@@ -104,6 +105,7 @@ module SolarJuice
         @specials = Resources::Specials.new(self)
         @shipping = Resources::Shipping.new(self)
         @orders = Resources::Orders.new(self)
+        @webhooks = Resources::Webhooks.new(self)
       end
 
       # GET /v1/health. Unauthenticated on the API side, but the key is sent

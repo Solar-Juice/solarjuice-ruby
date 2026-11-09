@@ -26,6 +26,11 @@ module SolarJuice
         "listOrders" => [:orders, :list],
         "getOrder" => [:orders, :get],
         "cancelOrder" => [:orders, :cancel],
+        "listWebhooks" => [:webhooks, :list],
+        "createWebhook" => [:webhooks, :create],
+        "deleteWebhook" => [:webhooks, :delete],
+        "enableWebhook" => [:webhooks, :enable],
+        "testWebhook" => [:webhooks, :test],
         "getHealth" => [nil, :health]
       }.freeze
 
@@ -98,7 +103,8 @@ module SolarJuice
         client = build_client
         arguments = {
           "sku" => "GW-5000-DNS-30",
-          "id" => "ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD"
+          "id" => "ord_01J6ZK3M5X8QW2R7Y9V4B1N0PD",
+          "webhook_id" => "wh_01m24fj0js2r8nkr2pwhc6wykm"
         }
 
         operations.each do |operation_id, path, verb, operation|

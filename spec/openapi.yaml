@@ -585,8 +585,19 @@ tags:
 
       ![How Solar Juice API webhooks work](/static/webhooks-flow.svg)
 
-      Everything is done with your own API key. Solar Juice never needs to send
-      you a secret out of band.
+      Everything is done with your own API key: no extra scope, no ticket to
+      us. Any key that can read the catalogue can manage that channel's
+      webhooks. Solar Juice never needs to send you a secret out of band.
+
+      A typical first hour:
+
+      1. `POST /v1/webhooks` with your URL and events. Keep the `secret` from
+         the response; it is shown once.
+      2. `POST /v1/webhooks/{id}/test` to send yourself a delivery and confirm
+         your receiver and signature check work.
+      3. Go live. If your receiver has an outage and we disable the endpoint,
+         `POST /v1/webhooks/{id}/enable` brings it back with the same id and
+         the same secret, so there is nothing to redeploy.
   - name: Health
     description: Unauthenticated liveness check.
 
@@ -2214,8 +2225,10 @@ paths:
         retried up to 8 times over roughly an hour with exponential backoff.
         After 200 consecutive failed attempts the endpoint is switched to
         `disabled` with a `disabled_reason`, and stops receiving events. Check
-        `GET /v1/webhooks` for delivery health; a disabled endpoint is fixed by
-        deleting it and registering again.
+        `GET /v1/webhooks` for delivery health. Once your receiver is healthy
+        again, call `POST /v1/webhooks/{webhook_id}/enable` to switch it back
+        on. That keeps the id and the signing secret, so there is nothing to
+        redeploy on your side.
       requestBody:
         required: true
         content:
@@ -2295,6 +2308,150 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/webhooks/{webhook_id}/enable:
+    post:
+      tags: [Webhooks]
+      operationId: enableWebhook
+      summary: Re-enable a disabled webhook endpoint
+      description: |
+        Switches a `disabled` endpoint back to `active` and clears its failure
+        count, so deliveries resume on the next event.
+
+        Use this after fixing whatever made your receiver fail. The endpoint
+        keeps its id and its signing secret, so you do not have to redeploy to
+        pick up a new one. Deleting and re-registering would issue a new
+        secret; this does not.
+
+        Calling it on an endpoint that is already active is harmless. An id
+        that belongs to another channel, or does not exist, returns `404` in
+        both cases.
+
+        ```bash
+        curl -sS -X POST https://api.solarjuice.com.au/v1/webhooks/wh_01m24fj0js2r8nkr2pwhc6wykm/enable \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: wh_01m24fj0js2r8nkr2pwhc6wykm
+      responses:
+        '200':
+          description: The endpoint, now active.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/webhooks/{webhook_id}/test:
+    post:
+      tags: [Webhooks]
+      operationId: testWebhook
+      summary: Send yourself a test delivery
+      description: |
+        Queues one `webhook.test` delivery to this endpoint so you can prove
+        your receiver and your signature check work, without waiting for a
+        real catalogue change.
+
+        It travels the same sender, the same signing and the same retry path
+        as a real event, so if this arrives and verifies, real events will
+        too. It normally lands within a few seconds. `webhook.test` cannot be
+        subscribed to and is never sent on its own: it only arrives because
+        you asked for it here.
+
+        The body looks like:
+
+        ```json
+        {
+          "message": "This is a test delivery from Solar Juice. Your endpoint is reachable and this signature is valid.",
+          "endpoint_id": "wh_01m24fj0js2r8nkr2pwhc6wykm",
+          "sent_at": "2026-09-11T06:40:12Z"
+        }
+        ```
+
+        A `disabled` endpoint is refused with `422` rather than queued, because
+        disabled endpoints receive nothing and the delivery would never arrive.
+        Re-enable it first.
+
+        ```bash
+        curl -sS -X POST https://api.solarjuice.com.au/v1/webhooks/wh_01m24fj0js2r8nkr2pwhc6wykm/test \
+          -H "Authorization: Bearer sj_live_<your key>"
+        ```
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: wh_01m24fj0js2r8nkr2pwhc6wykm
+      responses:
+        '202':
+          description: Queued for delivery.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queued, event]
+                properties:
+                  queued:
+                    type: boolean
+                  event:
+                    type: string
+                    example: webhook.test
+                  note:
+                    type: string
+              examples:
+                queued:
+                  value:
+                    queued: true
+                    event: webhook.test
+                    note: Delivered within a few seconds. If it does not arrive, check GET /v1/webhooks for the last error.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: |
+            The endpoint is disabled, so a delivery would never be sent. The
+            message names the endpoint's `/enable` call.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':

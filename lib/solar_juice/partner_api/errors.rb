@@ -61,6 +61,7 @@ module SolarJuice
     class NotFoundError < ApiError; end
     class ValidationFailedError < ApiError; end
     class PriceChangedError < ApiError; end
+    class InsufficientStockError < ApiError; end
     class IdempotencyConflictError < ApiError; end
     class QuoteUnavailableError < ApiError; end
     class StaleDataError < ApiError; end
@@ -79,6 +80,7 @@ module SolarJuice
       "VALIDATION_FAILED" => ValidationFailedError,
       "RATE_LIMITED" => RateLimitedError,
       "PRICE_CHANGED" => PriceChangedError,
+      "INSUFFICIENT_STOCK" => InsufficientStockError,
       "IDEMPOTENCY_CONFLICT" => IdempotencyConflictError,
       "QUOTE_UNAVAILABLE" => QuoteUnavailableError,
       "STALE_DATA" => StaleDataError,
@@ -88,7 +90,7 @@ module SolarJuice
     # The code to report when a response is not the documented envelope, for
     # example a proxy's own 502 HTML page. Without this, error.code is nil on
     # exactly the responses a caller branches on. 409 and 503 are deliberately
-    # absent: each maps to two codes, so without a body there is nothing to
+    # absent: each maps to more than one code, so without a body there is nothing to
     # choose between them and nil is the honest answer.
     ERROR_CODES_BY_STATUS = {
       401 => "UNAUTHORIZED",
