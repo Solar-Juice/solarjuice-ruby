@@ -9,6 +9,7 @@
     "ValidationFailed": "VALIDATION_FAILED",
     "RateLimited": "RATE_LIMITED",
     "PriceChanged": "PRICE_CHANGED",
+    "InsufficientStock": "INSUFFICIENT_STOCK",
     "IdempotencyConflict": "IDEMPOTENCY_CONFLICT",
     "QuoteUnavailable": "QUOTE_UNAVAILABLE",
     "StaleData": "STALE_DATA",
@@ -185,6 +186,19 @@
       "expect": {
         "error": "PriceChanged",
         "code": "PRICE_CHANGED",
+        "retried": false
+      }
+    },
+    {
+      "name": "a line asking for more than is sellable, also behind 409",
+      "status": 409,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"error\":{\"code\":\"INSUFFICIENT_STOCK\",\"message\":\"A line asks for more than is currently sellable.\",\"details\":[{\"sku\":\"GW-5000-DNS-30\",\"requested\":40,\"available\":12}]}}",
+      "expect": {
+        "error": "InsufficientStock",
+        "code": "INSUFFICIENT_STOCK",
         "retried": false
       }
     },

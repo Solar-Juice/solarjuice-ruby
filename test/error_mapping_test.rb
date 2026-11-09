@@ -23,6 +23,7 @@ module SolarJuice
         "ValidationFailed" => ValidationFailedError,
         "RateLimited" => RateLimitedError,
         "PriceChanged" => PriceChangedError,
+        "InsufficientStock" => InsufficientStockError,
         "IdempotencyConflict" => IdempotencyConflictError,
         "QuoteUnavailable" => QuoteUnavailableError,
         "StaleData" => StaleDataError,
